@@ -2,8 +2,12 @@
   "name": "python-inheritance-navigator",
   "displayName": "Python Inheritance Navigator",
   "description": "Navigate Python method inheritance with Go to Base Method and Go to Overrides commands",
-  "version": "0.1.2",
+  "version": "0.1.5",
   "publisher": "YonatanNethanel",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/YonatanNe/python-inheritance-navigator.git"
+  },
   "icon": "resources/icon.png",
   "engines": {
     "vscode": "^1.74.0"
@@ -33,6 +37,10 @@
       {
         "command": "pythonInheritance.openIndexFile",
         "title": "Open Index File"
+      },
+      {
+        "command": "pythonInheritance.navigateToLocation",
+        "title": "Navigate to Location"
       }
     ],
     "configuration": {
@@ -42,6 +50,11 @@
           "type": "boolean",
           "default": true,
           "description": "Enable CodeLens links for method inheritance navigation"
+        },
+        "pythonInheritance.enableHover": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable hover preview showing code snippets for base methods, overrides, and inheritance relationships"
         },
         "pythonInheritance.showBaseMethods": {
           "type": "boolean",

@@ -88,7 +88,7 @@ export class CommandHandlers {
         await this.navigateToLocation(method.file_path, method.line, method.column);
     }
     
-    private async navigateToLocation(filePath: string, line: number, column: number): Promise<void> {
+    async navigateToLocation(filePath: string, line: number, column: number): Promise<void> {
         const uri = vscode.Uri.file(filePath);
         const document = await vscode.workspace.openTextDocument(uri);
         const editor = await vscode.window.showTextDocument(document);

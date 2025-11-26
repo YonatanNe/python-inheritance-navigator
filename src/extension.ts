@@ -3,11 +3,13 @@ import * as path from 'path';
 import * as fs from 'fs';
 import { InheritanceIndexManager } from './index';
 import { InheritanceCodeLensProvider } from './codelens';
+import { InheritanceHoverProvider } from './hover';
 import { CommandHandlers } from './commands';
 import { initializeLogger, getLogger } from './utils/logger';
 
 let indexManager: InheritanceIndexManager | null = null;
 let codeLensProvider: InheritanceCodeLensProvider | null = null;
+let hoverProvider: InheritanceHoverProvider | null = null;
 let commandHandlers: CommandHandlers | null = null;
 
 export function activate(context: vscode.ExtensionContext) {
@@ -99,6 +101,7 @@ export function activate(context: vscode.ExtensionContext) {
 
     indexManager = new InheritanceIndexManager(workspaceRoot, pythonPath, extensionPath, storagePath);
     codeLensProvider = new InheritanceCodeLensProvider(indexManager);
+    hoverProvider = new InheritanceHoverProvider(indexManager);
     commandHandlers = new CommandHandlers(indexManager);
     
     // Refresh CodeLens when index is updated
@@ -111,6 +114,11 @@ export function activate(context: vscode.ExtensionContext) {
     const codeLensDisposable = vscode.languages.registerCodeLensProvider(
         { language: 'python' },
         codeLensProvider
+    );
+
+    const hoverDisposable = vscode.languages.registerHoverProvider(
+        { language: 'python' },
+        hoverProvider
     );
 
     const goToBaseCommand = vscode.commands.registerCommand(
@@ -168,12 +176,23 @@ export function activate(context: vscode.ExtensionContext) {
         }
     );
 
+    const navigateToLocationCommand = vscode.commands.registerCommand(
+        'pythonInheritance.navigateToLocation',
+        async (filePath: string, line: number, column: number) => {
+            if (commandHandlers) {
+                await commandHandlers.navigateToLocation(filePath, line, column);
+            }
+        }
+    );
+
     context.subscriptions.push(
         codeLensDisposable,
+        hoverDisposable,
         goToBaseCommand,
         goToOverridesCommand,
         refreshIndexCommand,
-        openIndexFileCommand
+        openIndexFileCommand,
+        navigateToLocationCommand
     );
 
     vscode.workspace.onDidChangeConfiguration((e) => {
@@ -225,6 +244,7 @@ export function deactivate() {
         indexManager = null;
     }
     codeLensProvider = null;
+    hoverProvider = null;
     commandHandlers = null;
     logger.dispose();
 }

@@ -48,3 +48,6 @@ test_full_extension.js
 Thumbs.db
 .DS_Store
 
+# Scripts
+scripts/publish.sh
+
