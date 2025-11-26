@@ -2,7 +2,9 @@
   "name": "python-inheritance-navigator",
   "displayName": "Python Inheritance Navigator",
   "description": "Navigate Python method inheritance with Go to Base Method and Go to Overrides commands",
-  "version": "0.1.0",
+  "version": "0.1.2",
+  "publisher": "YonatanNethanel",
+  "icon": "resources/icon.png",
   "engines": {
     "vscode": "^1.74.0"
   },
@@ -59,6 +61,16 @@
           ],
           "default": "workspace",
           "description": "Scope of files to index for inheritance analysis"
+        },
+        "pythonInheritance.saveLogToFile": {
+          "type": "boolean",
+          "default": false,
+          "description": "Save log messages to a file (.vscode/python-inheritance-navigator.log)"
+        },
+        "pythonInheritance.showOutputChannel": {
+          "type": "boolean",
+          "default": false,
+          "description": "Show extension output in the Output panel"
         }
       }
     }

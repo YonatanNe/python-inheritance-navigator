@@ -6,8 +6,13 @@ export class FileLogger {
     private logFile: string;
     private logStream: fs.WriteStream | null = null;
     private outputChannel: vscode.OutputChannel;
+    private saveToFile: boolean;
+    private showOutput: boolean;
 
-    constructor() {
+    constructor(saveToFile: boolean = false, showOutput: boolean = false) {
+        this.saveToFile = saveToFile;
+        this.showOutput = showOutput;
+        
         // Create VS Code output channel
         this.outputChannel = vscode.window.createOutputChannel('Python Inheritance Navigator');
         const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
@@ -23,7 +28,27 @@ export class FileLogger {
         }
         
         this.logFile = path.join(logDir, 'python-inheritance-navigator.log');
-        this.initialize();
+        if (this.saveToFile) {
+            this.initialize();
+        }
+    }
+
+    updateSettings(saveToFile: boolean, showOutput: boolean): void {
+        const fileLoggingChanged = this.saveToFile !== saveToFile;
+        this.saveToFile = saveToFile;
+        this.showOutput = showOutput;
+
+        // Handle file logging changes
+        if (fileLoggingChanged) {
+            if (saveToFile && !this.logStream) {
+                // Enable file logging
+                this.initialize();
+            } else if (!saveToFile && this.logStream) {
+                // Disable file logging
+                this.logStream.end();
+                this.logStream = null;
+            }
+        }
     }
 
     private initialize(): void {
@@ -70,14 +95,16 @@ export class FileLogger {
         const dataStr = data ? ' ' + JSON.stringify(data) : '';
         const outputLine = `[${timestamp}] [${level}] ${message}${dataStr}`;
         
-        // Write to VS Code output channel (visible in Output panel)
-        this.outputChannel.appendLine(outputLine);
+        // Write to VS Code output channel (visible in Output panel) if enabled
+        if (this.showOutput) {
+            this.outputChannel.appendLine(outputLine);
+        }
         
         // Also write to console for debugging
         console.log(`[Python Inheritance Navigator] [${level}] ${message}`, data || '');
         
-        // Write to file if stream is available
-        if (this.logStream) {
+        // Write to file if enabled and stream is available
+        if (this.saveToFile && this.logStream) {
             try {
                 this.logStream.write(logLine);
             } catch (error) {
@@ -106,7 +133,9 @@ export class FileLogger {
     }
 
     showOutputChannel(): void {
-        this.outputChannel.show(true);
+        if (this.showOutput) {
+            this.outputChannel.show(true);
+        }
     }
 
     dispose(): void {
@@ -118,5 +147,26 @@ export class FileLogger {
     }
 }
 
-export const logger = new FileLogger();
+// Logger will be initialized in extension.ts with configuration
+let loggerInstance: FileLogger | null = null;
+
+export function initializeLogger(saveToFile: boolean = false, showOutput: boolean = false): FileLogger {
+    if (!loggerInstance) {
+        loggerInstance = new FileLogger(saveToFile, showOutput);
+    } else {
+        // Update existing logger settings
+        loggerInstance.updateSettings(saveToFile, showOutput);
+    }
+    return loggerInstance;
+}
+
+export function getLogger(): FileLogger {
+    if (!loggerInstance) {
+        // Fallback to defaults if not initialized
+        loggerInstance = new FileLogger(false, false);
+    }
+    return loggerInstance;
+}
+
+export const logger = getLogger();
 

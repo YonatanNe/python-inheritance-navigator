@@ -4,15 +4,25 @@ import * as fs from 'fs';
 import { InheritanceIndexManager } from './index';
 import { InheritanceCodeLensProvider } from './codelens';
 import { CommandHandlers } from './commands';
-import { logger } from './utils/logger';
+import { initializeLogger, getLogger } from './utils/logger';
 
 let indexManager: InheritanceIndexManager | null = null;
 let codeLensProvider: InheritanceCodeLensProvider | null = null;
 let commandHandlers: CommandHandlers | null = null;
 
 export function activate(context: vscode.ExtensionContext) {
-    // Show output channel on activation
-    logger.showOutputChannel();
+    // Read configuration
+    const config = vscode.workspace.getConfiguration('pythonInheritance');
+    const saveLogToFile = config.get<boolean>('saveLogToFile', false);
+    const showOutputChannel = config.get<boolean>('showOutputChannel', false);
+    
+    // Initialize logger with configuration
+    const logger = initializeLogger(saveLogToFile, showOutputChannel);
+    
+    // Show output channel on activation if enabled
+    if (showOutputChannel) {
+        logger.showOutputChannel();
+    }
     logger.info('Extension activating', { extensionPath: context.extensionPath });
     
     const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
@@ -168,6 +178,20 @@ export function activate(context: vscode.ExtensionContext) {
 
     vscode.workspace.onDidChangeConfiguration((e) => {
         if (e.affectsConfiguration('pythonInheritance')) {
+            // Handle logger configuration changes
+            if (e.affectsConfiguration('pythonInheritance.saveLogToFile') || 
+                e.affectsConfiguration('pythonInheritance.showOutputChannel')) {
+                const newConfig = vscode.workspace.getConfiguration('pythonInheritance');
+                const newSaveLogToFile = newConfig.get<boolean>('saveLogToFile', false);
+                const newShowOutputChannel = newConfig.get<boolean>('showOutputChannel', false);
+                // Update logger with new settings
+                const updatedLogger = initializeLogger(newSaveLogToFile, newShowOutputChannel);
+                updatedLogger.info('Logger configuration updated', { 
+                    saveLogToFile: newSaveLogToFile, 
+                    showOutputChannel: newShowOutputChannel 
+                });
+            }
+            
             if (codeLensProvider) {
                 codeLensProvider.refresh();
             }
@@ -194,6 +218,7 @@ export function activate(context: vscode.ExtensionContext) {
 }
 
 export function deactivate() {
+    const logger = getLogger();
     logger.info('Extension deactivating');
     if (indexManager) {
         indexManager.dispose();

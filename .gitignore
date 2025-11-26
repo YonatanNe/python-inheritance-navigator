@@ -8,6 +8,7 @@ yarn-error.log*
 out/
 dist/
 *.js.map
+*.vsix
 
 # Python
 __pycache__/
