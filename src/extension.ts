@@ -6,6 +6,7 @@ import { InheritanceCodeLensProvider } from './codelens';
 import { InheritanceHoverProvider } from './hover';
 import { CommandHandlers } from './commands';
 import { initializeLogger, getLogger } from './utils/logger';
+import { countGitRepos } from './utils/gitRepoDetector';
 
 let indexManager: InheritanceIndexManager | null = null;
 let codeLensProvider: InheritanceCodeLensProvider | null = null;
@@ -36,6 +37,19 @@ export function activate(context: vscode.ExtensionContext) {
 
     const workspaceRoot = workspaceFolder.uri.fsPath;
     const pythonConfig = vscode.workspace.getConfiguration('python', workspaceFolder.uri);
+    const extensionConfig = vscode.workspace.getConfiguration('pythonInheritance');
+    // Guard: disable extension entirely if workspace has multiple Git repos and setting is enabled
+    const skipMultiRepo = extensionConfig.get<boolean>('skipFoldersWithMultipleGitRepos', true);
+    if (skipMultiRepo) {
+        const repoCount = countGitRepos(workspaceRoot, 3, 5);
+        logger.info('Multi-repo guard check', { workspaceRoot, repoCount, skipMultiRepo });
+        if (repoCount > 1) {
+            const message = 'Python Inheritance Navigator disabled: workspace contains multiple Git repositories. Update setting "Skip folders with multiple Git repos" to enable.';
+            logger.warn(message);
+            vscode.window.showWarningMessage(message);
+            return;
+        }
+    }
     
     // Try to get Python path from configuration
     let pythonPath = pythonConfig.get<string>('pythonPath') || 

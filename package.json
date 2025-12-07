@@ -2,7 +2,7 @@
   "name": "python-inheritance-navigator",
   "displayName": "Python Inheritance Navigator",
   "description": "Navigate Python method inheritance with Go to Base Method and Go to Overrides commands",
-  "version": "0.1.9",
+  "version": "0.1.10",
   "publisher": "YonatanNethanel",
   "repository": {
     "type": "git",

@@ -5,6 +5,7 @@ import { PythonClient } from './analysis/pythonClient';
 import { InheritanceIndex, MethodRelationship, FileInheritanceData } from './analysis/types';
 import { FileWatcher } from './utils/fileWatcher';
 import { logger } from './utils/logger';
+import { countGitRepos } from './utils/gitRepoDetector';
 
 export class InheritanceIndexManager {
     private index: InheritanceIndex = {};
@@ -18,20 +19,6 @@ export class InheritanceIndexManager {
     private storagePath: string | null = null;
     private indexFilePath: string | null = null;
     private workspaceRoot: string;
-    private static readonly gitIgnoreDirs = new Set([
-        '.git',
-        'node_modules',
-        '.venv',
-        'venv',
-        'env',
-        '.env',
-        'dist',
-        'build',
-        'out',
-        '.vscode',
-        '.idea',
-        '__pycache__'
-    ]);
 
     isIndexing(): boolean {
         return this._isIndexing;
@@ -70,51 +57,9 @@ export class InheritanceIndexManager {
             logger.debug('Skipping multi-repo guard because setting is disabled');
             return false;
         }
-        const repoCount = this._countGitRepos(this.workspaceRoot, 3, 5);
+        const repoCount = countGitRepos(this.workspaceRoot, 3, 5);
         logger.info('Detected Git repositories in workspace', { workspaceRoot: this.workspaceRoot, repoCount });
         return repoCount > 1;
-    }
-
-    private _countGitRepos(root: string, maxDepth = 3, maxRepos = 5): number {
-        let count = 0;
-        const stack: Array<{ dir: string; depth: number }> = [{ dir: root, depth: 0 }];
-
-        while (stack.length > 0) {
-            const { dir, depth } = stack.pop() as { dir: string; depth: number };
-            if (depth > maxDepth || count >= maxRepos) {
-                continue;
-            }
-
-            let entries: fs.Dirent[];
-            try {
-                entries = fs.readdirSync(dir, { withFileTypes: true });
-            } catch (error) {
-                logger.debug('Failed to read directory while counting Git repos', { dir, error });
-                continue;
-            }
-
-            for (const entry of entries) {
-                if (!entry.isDirectory()) {
-                    continue;
-                }
-
-                if (entry.name === '.git') {
-                    count += 1;
-                    if (count >= maxRepos) {
-                        return count;
-                    }
-                    continue;
-                }
-
-                if (InheritanceIndexManager.gitIgnoreDirs.has(entry.name)) {
-                    continue;
-                }
-
-                stack.push({ dir: path.join(dir, entry.name), depth: depth + 1 });
-            }
-        }
-
-        return count;
     }
     
     async loadIndexFromFile(): Promise<boolean> {

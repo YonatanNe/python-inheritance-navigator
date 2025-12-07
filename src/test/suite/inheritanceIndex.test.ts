@@ -4,6 +4,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import { InheritanceIndexManager } from '../../index';
+import { countGitRepos } from '../../utils/gitRepoDetector';
 
 suite('Inheritance Index Manager Tests', () => {
     let indexManager: InheritanceIndexManager;
@@ -40,8 +41,7 @@ suite('Inheritance Index Manager Tests', () => {
         fs.mkdirSync(repoA, { recursive: true });
         fs.mkdirSync(repoB, { recursive: true });
 
-        const repoCount = (indexManager as unknown as { _countGitRepos: (dir: string, maxDepth?: number, maxRepos?: number) => number })
-            ._countGitRepos(tempDir, 3, 10);
+        const repoCount = countGitRepos(tempDir, 3, 10);
 
         try {
             assert.strictEqual(repoCount, 2);
