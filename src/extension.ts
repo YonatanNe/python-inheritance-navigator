@@ -167,6 +167,18 @@ export function activate(context: vscode.ExtensionContext) {
         }
     );
 
+    const cleanAndReindexCommand = vscode.commands.registerCommand(
+        'pythonInheritance.cleanAndReindex',
+        async () => {
+            if (commandHandlers) {
+                await commandHandlers.cleanAndReindex();
+                if (codeLensProvider) {
+                    codeLensProvider.refresh();
+                }
+            }
+        }
+    );
+
     const openIndexFileCommand = vscode.commands.registerCommand(
         'pythonInheritance.openIndexFile',
         async () => {
@@ -191,6 +203,7 @@ export function activate(context: vscode.ExtensionContext) {
         goToBaseCommand,
         goToOverridesCommand,
         refreshIndexCommand,
+        cleanAndReindexCommand,
         openIndexFileCommand,
         navigateToLocationCommand
     );

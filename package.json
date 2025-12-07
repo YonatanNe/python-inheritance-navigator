@@ -2,7 +2,7 @@
   "name": "python-inheritance-navigator",
   "displayName": "Python Inheritance Navigator",
   "description": "Navigate Python method inheritance with Go to Base Method and Go to Overrides commands",
-  "version": "0.1.5",
+  "version": "0.1.9",
   "publisher": "YonatanNethanel",
   "repository": {
     "type": "git",
@@ -84,6 +84,11 @@
           "type": "boolean",
           "default": false,
           "description": "Show extension output in the Output panel"
+        },
+        "pythonInheritance.skipFoldersWithMultipleGitRepos": {
+          "type": "boolean",
+          "default": true,
+          "description": "Skip indexing folders that contain more than one Git repository (not recommended to disable)"
         }
       }
     }

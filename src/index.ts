@@ -18,6 +18,20 @@ export class InheritanceIndexManager {
     private storagePath: string | null = null;
     private indexFilePath: string | null = null;
     private workspaceRoot: string;
+    private static readonly gitIgnoreDirs = new Set([
+        '.git',
+        'node_modules',
+        '.venv',
+        'venv',
+        'env',
+        '.env',
+        'dist',
+        'build',
+        'out',
+        '.vscode',
+        '.idea',
+        '__pycache__'
+    ]);
 
     isIndexing(): boolean {
         return this._isIndexing;
@@ -47,6 +61,60 @@ export class InheritanceIndexManager {
             hash = hash & hash; // Convert to 32-bit integer
         }
         return Math.abs(hash).toString(36);
+    }
+
+    private async _shouldSkipForMultipleGitRepos(): Promise<boolean> {
+        const config = vscode.workspace.getConfiguration('pythonInheritance');
+        const skipEnabled = config.get<boolean>('skipFoldersWithMultipleGitRepos', true);
+        if (!skipEnabled) {
+            logger.debug('Skipping multi-repo guard because setting is disabled');
+            return false;
+        }
+        const repoCount = this._countGitRepos(this.workspaceRoot, 3, 5);
+        logger.info('Detected Git repositories in workspace', { workspaceRoot: this.workspaceRoot, repoCount });
+        return repoCount > 1;
+    }
+
+    private _countGitRepos(root: string, maxDepth = 3, maxRepos = 5): number {
+        let count = 0;
+        const stack: Array<{ dir: string; depth: number }> = [{ dir: root, depth: 0 }];
+
+        while (stack.length > 0) {
+            const { dir, depth } = stack.pop() as { dir: string; depth: number };
+            if (depth > maxDepth || count >= maxRepos) {
+                continue;
+            }
+
+            let entries: fs.Dirent[];
+            try {
+                entries = fs.readdirSync(dir, { withFileTypes: true });
+            } catch (error) {
+                logger.debug('Failed to read directory while counting Git repos', { dir, error });
+                continue;
+            }
+
+            for (const entry of entries) {
+                if (!entry.isDirectory()) {
+                    continue;
+                }
+
+                if (entry.name === '.git') {
+                    count += 1;
+                    if (count >= maxRepos) {
+                        return count;
+                    }
+                    continue;
+                }
+
+                if (InheritanceIndexManager.gitIgnoreDirs.has(entry.name)) {
+                    continue;
+                }
+
+                stack.push({ dir: path.join(dir, entry.name), depth: depth + 1 });
+            }
+        }
+
+        return count;
     }
     
     async loadIndexFromFile(): Promise<boolean> {
@@ -214,6 +282,13 @@ export class InheritanceIndexManager {
         try {
             if (scope === 'workspace') {
                 logger.debug('Indexing entire workspace');
+                const shouldSkip = await this._shouldSkipForMultipleGitRepos();
+                if (shouldSkip) {
+                    logger.warn('Indexing skipped because folder contains multiple Git repositories and skip setting is enabled');
+                    vscode.window.showWarningMessage('Python Inheritance Navigator: Skipped indexing because the folder contains multiple Git repositories (adjust setting "Skip folders with multiple Git repos" to override)');
+                    progress?.report({ increment: 100, message: 'Indexing skipped (multiple Git repos detected)' });
+                    return;
+                }
                 progress?.report({ increment: 0, message: 'Scanning workspace for Python files...' });
                 
                 // Start the analysis (it runs in background)
@@ -574,27 +649,27 @@ export class InheritanceIndexManager {
             vscode.window.showInformationMessage('Indexing already in progress');
             return;
         }
-        
+
         this.index = {};
-        
+
         const config = vscode.workspace.getConfiguration('pythonInheritance');
         const indexingScope = config.get<string>('indexingScope', 'workspace');
-        
+
         this._isIndexing = true;
-        
+
         await vscode.window.withProgress({
             location: vscode.ProgressLocation.Notification,
             title: 'Python Inheritance Navigator',
             cancellable: false
         }, async (progress) => {
             progress.report({ increment: 0, message: 'Refreshing index...' });
-            
+
             try {
                 await this._performIndexing(indexingScope, progress);
-                
+
                 // Get file count for notification
                 const fileCount = Object.keys(this.index).length;
-                
+
                 // Show success notification
                 vscode.window.showInformationMessage(
                     `Python Inheritance Navigator: Index refreshed - found inheritance in ${fileCount} files`,
@@ -604,8 +679,63 @@ export class InheritanceIndexManager {
                         logger.showOutputChannel();
                     }
                 });
-                
+
                 // Save index to file
+                this._saveIndexToFile();
+            } finally {
+                this._isIndexing = false;
+            }
+        });
+    }
+
+    async cleanAndReindex(): Promise<void> {
+        if (this._isIndexing) {
+            vscode.window.showInformationMessage('Indexing already in progress');
+            return;
+        }
+
+        // Delete the saved index file if it exists
+        if (this.indexFilePath && fs.existsSync(this.indexFilePath)) {
+            try {
+                fs.unlinkSync(this.indexFilePath);
+                logger.info('Deleted saved index file', { filePath: this.indexFilePath });
+            } catch (error) {
+                logger.error('Failed to delete saved index file', { error, filePath: this.indexFilePath });
+            }
+        }
+
+        // Clear the in-memory index
+        this.index = {};
+
+        const config = vscode.workspace.getConfiguration('pythonInheritance');
+        const indexingScope = config.get<string>('indexingScope', 'workspace');
+
+        this._isIndexing = true;
+
+        await vscode.window.withProgress({
+            location: vscode.ProgressLocation.Notification,
+            title: 'Python Inheritance Navigator',
+            cancellable: false
+        }, async (progress) => {
+            progress.report({ increment: 0, message: 'Cleaning and rebuilding index...' });
+
+            try {
+                await this._performIndexing(indexingScope, progress);
+
+                // Get file count for notification
+                const fileCount = Object.keys(this.index).length;
+
+                // Show success notification
+                vscode.window.showInformationMessage(
+                    `Python Inheritance Navigator: Index cleaned and rebuilt - found inheritance in ${fileCount} files`,
+                    'View Log'
+                ).then(selection => {
+                    if (selection === 'View Log') {
+                        logger.showOutputChannel();
+                    }
+                });
+
+                // Save new index to file
                 this._saveIndexToFile();
             } finally {
                 this._isIndexing = false;

@@ -142,6 +142,20 @@ export class CommandHandlers {
         );
     }
 
+    async cleanAndReindex(): Promise<void> {
+        vscode.window.withProgress(
+            {
+                location: vscode.ProgressLocation.Notification,
+                title: 'Cleaning and reindexing inheritance...',
+                cancellable: false
+            },
+            async () => {
+                await this.indexManager.cleanAndReindex();
+                vscode.window.showInformationMessage('Inheritance index cleaned and rebuilt');
+            }
+        );
+    }
+
     async openIndexFile(): Promise<void> {
         const indexFilePath = this.indexManager.getIndexFilePath();
         if (!indexFilePath) {
