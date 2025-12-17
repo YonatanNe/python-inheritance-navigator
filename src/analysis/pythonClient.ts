@@ -157,5 +157,77 @@ export class PythonClient {
             });
         });
     }
+
+    async analyzeFiles(filePaths: string[]): Promise<InheritanceIndex> {
+        if (filePaths.length === 0) {
+            logger.debug('No files to analyze');
+            return {};
+        }
+
+        logger.debug('Analyzing multiple files', { fileCount: filePaths.length });
+
+        return new Promise((resolve, reject) => {
+            const args = [this.analyzerPath, this.workspaceRoot, ...filePaths];
+            const process = spawn(
+                this.pythonPath,
+                args,
+                {
+                    cwd: this.workspaceRoot,
+                    stdio: ['pipe', 'pipe', 'pipe']
+                }
+            );
+
+            let stdout = '';
+            let stderr = '';
+
+            process.stdout.on('data', (data) => {
+                stdout += data.toString();
+            });
+
+            process.stderr.on('data', (data) => {
+                const stderrData = data.toString();
+                stderr += stderrData;
+                // Parse stats from stderr if present
+                if (stderrData.includes('[STATS]')) {
+                    const statsMatch = stderrData.match(/Scanned (\d+) Python files, found inheritance in (\d+) files/);
+                    if (statsMatch) {
+                        this.indexingStats.totalScanned = parseInt(statsMatch[1], 10);
+                        this.indexingStats.filesWithInheritance = parseInt(statsMatch[2], 10);
+                        logger.info('Batch indexing statistics', { 
+                            totalScanned: this.indexingStats.totalScanned, 
+                            filesWithInheritance: this.indexingStats.filesWithInheritance 
+                        });
+                    }
+                }
+            });
+
+            process.on('close', (code) => {
+                if (code !== 0) {
+                    logger.error('Python analyzer failed for batch', { code, fileCount: filePaths.length, stderr });
+                    reject(new Error(`Python analyzer exited with code ${code}: ${stderr}`));
+                    return;
+                }
+
+                try {
+                    const result = JSON.parse(stdout);
+                    const fileCount = Object.keys(result).length;
+                    logger.debug('Batch analysis completed', { 
+                        fileCount,
+                        inputFiles: filePaths.length,
+                        stats: stderr.includes('[STATS]') ? stderr.match(/\[STATS\].*/)?.[0] : undefined
+                    });
+                    resolve(result as InheritanceIndex);
+                } catch (error) {
+                    logger.error('Failed to parse analyzer output for batch', { error, fileCount: filePaths.length });
+                    reject(new Error(`Failed to parse analyzer output: ${error}`));
+                }
+            });
+
+            process.on('error', (error) => {
+                logger.error('Failed to spawn Python process for batch', { error, fileCount: filePaths.length });
+                reject(new Error(`Failed to spawn Python process: ${error.message}`));
+            });
+        });
+    }
 }
 

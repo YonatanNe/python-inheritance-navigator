@@ -170,16 +170,35 @@ class InheritanceAnalyzer:
 
 def main():
     if len(sys.argv) < 2:
-        print(json.dumps({'error': 'Usage: inheritance_analyzer.py <workspace_root> [file_path]'}), file=sys.stderr)
+        print(json.dumps({'error': 'Usage: inheritance_analyzer.py <workspace_root> [file_path1] [file_path2] ... [file_pathN]'}), file=sys.stderr)
         sys.exit(1)
     
     workspace_root = sys.argv[1]
     analyzer = InheritanceAnalyzer(workspace_root)
     
     if len(sys.argv) > 2:
-        file_path = sys.argv[2]
-        result = analyzer.analyze_file(file_path)
+        # Multiple file paths provided - analyze each file
+        file_paths = sys.argv[2:]
+        total_files = len(file_paths)
+        files_with_inheritance = 0
+        
+        for file_path in file_paths:
+            try:
+                file_result = analyzer.analyze_file(file_path)
+                if file_result and len(file_result) > 0:
+                    files_with_inheritance += 1
+            except Exception as e:
+                print(f'Error analyzing {file_path}: {e}', file=sys.stderr)
+                # Continue processing other files even if one fails
+        
+        # Get combined results from all files
+        result = analyzer.inheritance_analyzer.to_json()
+        files_indexed = len(result)
+        
+        # Log statistics to stderr (won't break JSON output)
+        print(f'[STATS] Scanned {total_files} Python files, found inheritance in {files_indexed} files', file=sys.stderr)
     else:
+        # No file paths provided - analyze entire workspace
         result = analyzer.analyze_workspace(workspace_root)
     
     print(json.dumps(result, indent=2))

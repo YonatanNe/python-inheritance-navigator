@@ -95,10 +95,9 @@ export class FileLogger {
         const dataStr = data ? ' ' + JSON.stringify(data) : '';
         const outputLine = `[${timestamp}] [${level}] ${message}${dataStr}`;
         
-        // Write to VS Code output channel (visible in Output panel) if enabled
-        if (this.showOutput) {
-            this.outputChannel.appendLine(outputLine);
-        }
+        // Always write to VS Code output channel (users can manually open it)
+        // The showOutput setting only controls whether to automatically show the window
+        this.outputChannel.appendLine(outputLine);
         
         // Also write to console for debugging
         console.log(`[Python Inheritance Navigator] [${level}] ${message}`, data || '');
@@ -133,9 +132,9 @@ export class FileLogger {
     }
 
     showOutputChannel(): void {
-        if (this.showOutput) {
-            this.outputChannel.show(true);
-        }
+        // Always show the output channel when explicitly requested
+        // The showOutput setting only controls automatic display on activation
+        this.outputChannel.show(true);
     }
 
     dispose(): void {

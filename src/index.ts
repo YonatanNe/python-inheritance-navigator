@@ -4,6 +4,8 @@ import * as fs from 'fs';
 import { PythonClient } from './analysis/pythonClient';
 import { InheritanceIndex, MethodRelationship, FileInheritanceData } from './analysis/types';
 import { FileWatcher } from './utils/fileWatcher';
+import { FileChangeQueue } from './utils/fileChangeQueue';
+import { BatchProgressDisplay } from './utils/batchProgressDisplay';
 import { logger } from './utils/logger';
 import { countGitRepos } from './utils/gitRepoDetector';
 
@@ -11,6 +13,8 @@ export class InheritanceIndexManager {
     private index: InheritanceIndex = {};
     private pythonClient: PythonClient;
     private fileWatcher: FileWatcher | null = null;
+    private fileChangeQueue: FileChangeQueue | null = null;
+    private batchProgressDisplay: BatchProgressDisplay | null = null;
     private _isIndexing = false;
     private indexingPromise: Promise<void> | null = null;
     private onIndexUpdatedEmitter: vscode.EventEmitter<void> = new vscode.EventEmitter<void>();
@@ -26,7 +30,12 @@ export class InheritanceIndexManager {
 
     constructor(workspaceRoot: string, pythonPath = 'python3', extensionPath?: string, storagePath?: string) {
         this.workspaceRoot = workspaceRoot;
-        this.pythonClient = new PythonClient(workspaceRoot, pythonPath, extensionPath);
+        const config = vscode.workspace.getConfiguration('pythonInheritance');
+        this.pythonClient = new PythonClient(
+            workspaceRoot,
+            pythonPath,
+            extensionPath
+        );
         if (storagePath) {
             this.storagePath = storagePath;
             // Create storage directory if it doesn't exist
@@ -37,6 +46,43 @@ export class InheritanceIndexManager {
             const workspaceHash = this._getWorkspaceHash(workspaceRoot);
             this.indexFilePath = path.join(storagePath, `inheritance-index-${workspaceHash}.json`);
         }
+
+        // Initialize FileChangeQueue with configuration
+        const debounceMs = config.get<number>('fileChangeDebounceMs', 3000);
+        const batchSize = config.get<number>('filesPerBatch', 50);
+        const maxConcurrent = config.get<number>('maxConcurrentAnalyses', 10);
+
+        // Create batch progress display
+        this.batchProgressDisplay = new BatchProgressDisplay();
+
+        this.fileChangeQueue = new FileChangeQueue(
+            async (filePaths: string[]) => {
+                // Batch processor callback
+                const batchResult = await this.pythonClient.analyzeFiles(filePaths);
+                // Update index for each file that appears in the batch result (without saving)
+                for (const filePath of Object.keys(batchResult)) {
+                    this._updateFileInIndexWithoutSaving(filePath, batchResult);
+                }
+                // Also handle files that were requested but don't appear in result
+                // (e.g., files with no inheritance relationships)
+                for (const filePath of filePaths) {
+                    if (!(filePath in batchResult)) {
+                        // File was analyzed but has no inheritance data - remove from index
+                        delete this.index[filePath];
+                        logger.debug('Removed file from index (no inheritance)', { filePath });
+                    }
+                }
+                // Save index after batch update
+                this._saveIndexToFile();
+                // Notify that index was updated
+                this.onIndexUpdatedEmitter.fire();
+                return batchResult;
+            },
+            debounceMs,
+            batchSize,
+            maxConcurrent,
+            this.batchProgressDisplay
+        );
     }
     
     private _getWorkspaceHash(workspaceRoot: string): string {
@@ -343,30 +389,30 @@ export class InheritanceIndexManager {
         );
 
         this.fileWatcher = new FileWatcher(pattern);
-        this.fileWatcher.onDidChange(async (uri) => {
-            logger.debug('File changed, re-indexing', { filePath: uri.fsPath });
-            try {
-                const fileIndex = await this.pythonClient.analyzeFile(uri.fsPath);
-                this._updateFileInIndex(uri.fsPath, fileIndex);
-            } catch (error) {
-                logger.error('Failed to update index for file', { filePath: uri.fsPath, error });
-                console.error(`Failed to update index for ${uri.fsPath}:`, error);
+        this.fileWatcher.onDidChange((uri) => {
+            logger.debug('File changed, adding to queue', { filePath: uri.fsPath });
+            if (this.fileChangeQueue) {
+                this.fileChangeQueue.addFile(uri.fsPath);
             }
         });
         
-        this.fileWatcher.onDidCreate(async (uri) => {
-            logger.debug('New file created, indexing', { filePath: uri.fsPath });
-            try {
-                const fileIndex = await this.pythonClient.analyzeFile(uri.fsPath);
-                this._updateFileInIndex(uri.fsPath, fileIndex);
-            } catch (error) {
-                logger.error('Failed to index new file', { filePath: uri.fsPath, error });
-                console.error(`Failed to index new file ${uri.fsPath}:`, error);
+        this.fileWatcher.onDidCreate((uri) => {
+            logger.debug('New file created, adding to queue', { filePath: uri.fsPath });
+            if (this.fileChangeQueue) {
+                this.fileChangeQueue.addFile(uri.fsPath);
             }
         });
     }
 
     private _updateFileInIndex(filePath: string, fileIndex: InheritanceIndex): void {
+        this._updateFileInIndexWithoutSaving(filePath, fileIndex);
+        // Save index to file
+        this._saveIndexToFile();
+        // Notify that index was updated
+        this.onIndexUpdatedEmitter.fire();
+    }
+
+    private _updateFileInIndexWithoutSaving(filePath: string, fileIndex: InheritanceIndex): void {
         if (filePath in fileIndex) {
             this.index[filePath] = fileIndex[filePath];
             const fileData = fileIndex[filePath];
@@ -376,10 +422,6 @@ export class InheritanceIndexManager {
             delete this.index[filePath];
             logger.debug('Removed file from index', { filePath });
         }
-        // Save index to file
-        this._saveIndexToFile();
-        // Notify that index was updated
-        this.onIndexUpdatedEmitter.fire();
     }
     
     private _refreshIndexInBackground(): void {
@@ -692,6 +734,14 @@ export class InheritanceIndexManager {
         if (this.fileWatcher) {
             this.fileWatcher.dispose();
             this.fileWatcher = null;
+        }
+        if (this.fileChangeQueue) {
+            this.fileChangeQueue.dispose();
+            this.fileChangeQueue = null;
+        }
+        if (this.batchProgressDisplay) {
+            this.batchProgressDisplay.dispose();
+            this.batchProgressDisplay = null;
         }
     }
 }

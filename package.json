@@ -2,7 +2,7 @@
   "name": "python-inheritance-navigator",
   "displayName": "Python Inheritance Navigator",
   "description": "Navigate Python method inheritance with Go to Base Method and Go to Overrides commands",
-  "version": "0.1.10",
+  "version": "0.1.12",
   "publisher": "YonatanNethanel",
   "repository": {
     "type": "git",
@@ -89,6 +89,21 @@
           "type": "boolean",
           "default": true,
           "description": "Skip indexing folders that contain more than one Git repository (not recommended to disable)"
+        },
+        "pythonInheritance.fileChangeDebounceMs": {
+          "type": "number",
+          "default": 3000,
+          "description": "Debounce delay in milliseconds for file change events"
+        },
+        "pythonInheritance.maxConcurrentAnalyses": {
+          "type": "number",
+          "default": 10,
+          "description": "Maximum number of concurrent Python analysis processes"
+        },
+        "pythonInheritance.filesPerBatch": {
+          "type": "number",
+          "default": 50,
+          "description": "Number of files to process per batch"
         }
       }
     }
