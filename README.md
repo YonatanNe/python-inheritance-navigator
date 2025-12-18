@@ -2,6 +2,9 @@
 
 A VS Code extension that helps developers navigate Python method inheritance by providing "Go to Base Method" and "Go to Overrides" commands via CodeLens.
 
+![sample](https://github.com/user-attachments/assets/d8d119c2-b756-486e-b39d-b9ac4cd61ce3)
+
+
 ## Features
 
 - **Go to Base Method**: Navigate to the base method definition when a method overrides a parent class method
