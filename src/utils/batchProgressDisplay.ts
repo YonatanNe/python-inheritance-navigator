@@ -81,10 +81,6 @@ export class BatchProgressDisplay {
         this.refresh(); // Immediate refresh for batch completion (important event)
     }
 
-    show(): void {
-        this.outputChannel.show(true);
-    }
-
     hide(): void {
         this.outputChannel.hide();
     }
