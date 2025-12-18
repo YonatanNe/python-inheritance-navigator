@@ -139,7 +139,6 @@ export class FileChangeQueue {
                 this.batchQueue.length,
                 this.activeBatchCount
             );
-            this.progressDisplay.show();
 
             // Process batch asynchronously (don't await - allows concurrent processing)
             this.processBatchAsync(batch, batchId).finally(() => {
