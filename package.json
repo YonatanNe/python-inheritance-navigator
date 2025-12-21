@@ -35,8 +35,16 @@
         "title": "Refresh Inheritance Index"
       },
       {
+        "command": "pythonInheritance.cleanAndReindex",
+        "title": "Clean and Reindex"
+      },
+      {
         "command": "pythonInheritance.openIndexFile",
         "title": "Open Index File"
+      },
+      {
+        "command": "pythonInheritance.clearAllIndexes",
+        "title": "Clear All Indexes"
       },
       {
         "command": "pythonInheritance.navigateToLocation",

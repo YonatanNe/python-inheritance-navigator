@@ -322,7 +322,14 @@ export class InheritanceIndexManager {
             } else {
                 logger.debug('Indexing open files only');
                 const openFiles = vscode.workspace.textDocuments
-                    .filter(doc => doc.languageId === 'python' && doc.uri.scheme === 'file')
+                    .filter(doc => {
+                        if (doc.languageId !== 'python' || doc.uri.scheme !== 'file') {
+                            return false;
+                        }
+                        // Exclude .history directories
+                        const filePath = doc.uri.fsPath;
+                        return !filePath.includes('/.history/') && !filePath.includes('\\.history\\');
+                    })
                     .map(doc => doc.uri.fsPath);
                 
                 logger.debug('Found open Python files', { count: openFiles.length });
@@ -390,6 +397,10 @@ export class InheritanceIndexManager {
 
         this.fileWatcher = new FileWatcher(pattern);
         this.fileWatcher.onDidChange((uri) => {
+            // Exclude .history directories
+            if (uri.fsPath.includes('/.history/') || uri.fsPath.includes('\\.history\\')) {
+                return;
+            }
             logger.debug('File changed, adding to queue', { filePath: uri.fsPath });
             if (this.fileChangeQueue) {
                 this.fileChangeQueue.addFile(uri.fsPath);
@@ -397,6 +408,10 @@ export class InheritanceIndexManager {
         });
         
         this.fileWatcher.onDidCreate((uri) => {
+            // Exclude .history directories
+            if (uri.fsPath.includes('/.history/') || uri.fsPath.includes('\\.history\\')) {
+                return;
+            }
             logger.debug('New file created, adding to queue', { filePath: uri.fsPath });
             if (this.fileChangeQueue) {
                 this.fileChangeQueue.addFile(uri.fsPath);
@@ -728,6 +743,32 @@ export class InheritanceIndexManager {
                 this._isIndexing = false;
             }
         });
+    }
+
+    async clearAllIndexes(): Promise<void> {
+        if (this._isIndexing) {
+            vscode.window.showInformationMessage('Indexing already in progress');
+            return;
+        }
+
+        // Delete the saved index file if it exists
+        if (this.indexFilePath && fs.existsSync(this.indexFilePath)) {
+            try {
+                fs.unlinkSync(this.indexFilePath);
+                logger.info('Deleted saved index file', { filePath: this.indexFilePath });
+            } catch (error) {
+                logger.error('Failed to delete saved index file', { error, filePath: this.indexFilePath });
+            }
+        }
+
+        // Clear the in-memory index
+        this.index = {};
+
+        // Notify that index was cleared
+        this.onIndexUpdatedEmitter.fire();
+
+        logger.info('All indexes cleared');
+        vscode.window.showInformationMessage('Python Inheritance Navigator: All indexes cleared');
     }
 
     dispose(): void {

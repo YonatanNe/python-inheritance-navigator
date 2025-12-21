@@ -179,6 +179,18 @@ export function activate(context: vscode.ExtensionContext) {
             }
         );
 
+        const clearAllIndexesCommand = vscode.commands.registerCommand(
+            'pythonInheritance.clearAllIndexes',
+            async () => {
+                if (commandHandlers) {
+                    await commandHandlers.clearAllIndexes();
+                    if (codeLensProvider) {
+                        codeLensProvider.refresh();
+                    }
+                }
+            }
+        );
+
         const navigateToLocationCommand = vscode.commands.registerCommand(
             'pythonInheritance.navigateToLocation',
             async (filePath: string, line: number, column: number) => {
@@ -196,6 +208,7 @@ export function activate(context: vscode.ExtensionContext) {
             refreshIndexCommand,
             cleanAndReindexCommand,
             openIndexFileCommand,
+            clearAllIndexesCommand,
             navigateToLocationCommand
         );
 

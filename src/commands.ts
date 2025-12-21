@@ -173,5 +173,18 @@ export class CommandHandlers {
         await vscode.window.showTextDocument(document);
         vscode.window.showInformationMessage(`Index file opened: ${indexFilePath}`);
     }
+
+    async clearAllIndexes(): Promise<void> {
+        const result = await vscode.window.showWarningMessage(
+            'Are you sure you want to clear all indexes? This will delete the saved index file and clear the in-memory index.',
+            { modal: true },
+            'Clear All',
+            'Cancel'
+        );
+
+        if (result === 'Clear All') {
+            await this.indexManager.clearAllIndexes();
+        }
+    }
 }
 

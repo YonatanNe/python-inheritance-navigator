@@ -141,7 +141,7 @@ class InheritanceAnalyzer:
         python_files = []
         
         for root, dirs, files in os.walk(workspace_root):
-            dirs[:] = [d for d in dirs if d not in ('.git', '__pycache__', '.venv', 'venv', 'node_modules')]
+            dirs[:] = [d for d in dirs if d not in ('.git', '__pycache__', '.venv', 'venv', 'node_modules', '.history')]
             
             for file in files:
                 if file.endswith('.py'):
