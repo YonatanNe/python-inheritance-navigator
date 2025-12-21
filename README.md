@@ -15,9 +15,9 @@ A VS Code extension that helps developers navigate Python method inheritance by 
 
 ## Requirements
 
-- Python 3.6+
+- Python 3.6+ (for creating the extension's virtual environment)
 - VS Code 1.74.0 or higher
-- `python-mro-language-server` package (installed automatically)
+- Dependencies (`python-mro-language-server`, `jedi`, `parso`) are automatically installed into an extension-managed virtual environment
 
 ## Installation
 
@@ -66,18 +66,19 @@ The extension logs all operations to a file for debugging:
 If you encounter issues:
 1. Check the log file for detailed error messages
 2. Look for Python path issues (the log shows which Python executable is being used)
-3. Verify that `python-mro-language-server` is installed in your Python environment
+3. The extension manages its own Python virtual environment - no manual installation needed
 
 ### Common Issues
 
-**"Failed to spawn Python process: spawn python ENOENT"**
-- The extension can't find the Python executable
-- Set the Python path in VS Code settings: `python.pythonPath` or `python.defaultInterpreterPath`
-- Or ensure `python3` is in your system PATH
+**"Failed to initialize Python Inheritance Navigator: Could not find Python 3.6+ executable"**
+- The extension needs Python 3.6+ to create its virtual environment
+- Ensure `python3` (or `python` on Windows) is available in your system PATH
+- The extension will automatically install required dependencies into its own isolated environment
 
 **"Python analyzer exited with code X"**
 - Check the log file for the full error message from the Python analyzer
-- Ensure `python-mro-language-server` is installed: `pip install python-mro-language-server jedi`
+- The extension uses its own managed virtual environment - dependencies are installed automatically on first use
+- If issues persist, try reloading VS Code to reinitialize the extension environment
 
 ## Limitations
 

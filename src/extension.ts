@@ -7,6 +7,7 @@ import { InheritanceHoverProvider } from './hover';
 import { CommandHandlers } from './commands';
 import { initializeLogger, getLogger } from './utils/logger';
 import { countGitRepos } from './utils/gitRepoDetector';
+import { VenvManager } from './utils/venvManager';
 
 let indexManager: InheritanceIndexManager | null = null;
 let codeLensProvider: InheritanceCodeLensProvider | null = null;
@@ -36,8 +37,8 @@ export function activate(context: vscode.ExtensionContext) {
     }
 
     const workspaceRoot = workspaceFolder.uri.fsPath;
-    const pythonConfig = vscode.workspace.getConfiguration('python', workspaceFolder.uri);
     const extensionConfig = vscode.workspace.getConfiguration('pythonInheritance');
+    
     // Guard: disable extension entirely if workspace has multiple Git repos and setting is enabled
     const skipMultiRepo = extensionConfig.get<boolean>('skipFoldersWithMultipleGitRepos', true);
     if (skipMultiRepo) {
@@ -50,51 +51,6 @@ export function activate(context: vscode.ExtensionContext) {
             return;
         }
     }
-    
-    // Try to get Python path from configuration
-    let pythonPath = pythonConfig.get<string>('pythonPath') || 
-                     pythonConfig.get<string>('defaultInterpreterPath');
-    
-    // If not configured, try local venv first
-    if (!pythonPath) {
-        const venvPath = path.join(workspaceRoot, '.venv', 'bin', 'python');
-        if (fs.existsSync(venvPath)) {
-            pythonPath = venvPath;
-            logger.info('Using local venv Python', { pythonPath: venvPath });
-        }
-    }
-    
-    // If still no path, try python3 (not python, which might not exist)
-    if (!pythonPath) {
-        pythonPath = 'python3';
-        logger.warn('No venv or config found, using python3', { workspaceRoot });
-    }
-    
-    // If path is "python" (which doesn't exist on macOS), change to python3
-    if (pythonPath === 'python') {
-        logger.warn('Python path is "python", changing to "python3"', { originalPath: pythonPath });
-        pythonPath = 'python3';
-    }
-    
-    // Verify the path exists (for absolute paths)
-    if (pythonPath && path.isAbsolute(pythonPath) && !fs.existsSync(pythonPath)) {
-        logger.error('Configured Python path does not exist', { pythonPath });
-        // Fallback to venv or python3
-        const venvPath = path.join(workspaceRoot, '.venv', 'bin', 'python');
-        if (fs.existsSync(venvPath)) {
-            pythonPath = venvPath;
-            logger.info('Falling back to venv Python', { pythonPath: venvPath });
-        } else {
-            pythonPath = 'python3';
-            logger.warn('Falling back to python3');
-        }
-    }
-    
-    logger.info('Final Python path', { 
-        pythonPath, 
-        isAbsolute: path.isAbsolute(pythonPath), 
-        exists: path.isAbsolute(pythonPath) ? fs.existsSync(pythonPath) : 'N/A (will check at runtime)' 
-    });
     
     const extensionPath = context.extensionPath;
     
@@ -111,156 +67,178 @@ export function activate(context: vscode.ExtensionContext) {
         storagePath = context.storagePath;
     }
 
-    logger.info('Initializing components', { workspaceRoot, pythonPath, extensionPath, storagePath });
+    if (!storagePath) {
+        logger.error('No storage path available');
+        vscode.window.showErrorMessage('Python Inheritance Navigator: Unable to initialize storage path');
+        return;
+    }
 
-    indexManager = new InheritanceIndexManager(workspaceRoot, pythonPath, extensionPath, storagePath);
-    codeLensProvider = new InheritanceCodeLensProvider(indexManager);
-    hoverProvider = new InheritanceHoverProvider(indexManager);
-    commandHandlers = new CommandHandlers(indexManager);
-    
-    // Refresh CodeLens when index is updated
-    indexManager.onIndexUpdated(() => {
-        if (codeLensProvider) {
-            codeLensProvider.refresh();
+    // Initialize venv manager and ensure venv is set up (async initialization)
+    (async () => {
+        const venvManager = new VenvManager(storagePath, extensionPath);
+        let pythonPath: string;
+        
+        try {
+            pythonPath = await venvManager.ensureVenv();
+            logger.info('Using extension-managed venv', { pythonPath });
+        } catch (error) {
+            logger.error('Failed to setup extension venv', error);
+            const errorMessage = error instanceof Error ? error.message : String(error);
+            vscode.window.showErrorMessage(`Failed to initialize Python Inheritance Navigator: ${errorMessage}`);
+            return;
         }
-    });
 
-    const codeLensDisposable = vscode.languages.registerCodeLensProvider(
-        { language: 'python' },
-        codeLensProvider
-    );
+        logger.info('Initializing components', { workspaceRoot, pythonPath, extensionPath, storagePath });
 
-    const hoverDisposable = vscode.languages.registerHoverProvider(
-        { language: 'python' },
-        hoverProvider
-    );
-
-    const goToBaseCommand = vscode.commands.registerCommand(
-        'pythonInheritance.goToBase',
-        async (method: unknown) => {
-            if (commandHandlers) {
-                await commandHandlers.goToBaseMethod(method as {
-                    file_path: string;
-                    line: number;
-                    column: number;
-                    end_line: number;
-                    end_column: number;
-                    class_name: string;
-                    name: string;
-                });
+        indexManager = new InheritanceIndexManager(workspaceRoot, pythonPath, extensionPath, storagePath);
+        codeLensProvider = new InheritanceCodeLensProvider(indexManager);
+        hoverProvider = new InheritanceHoverProvider(indexManager);
+        commandHandlers = new CommandHandlers(indexManager);
+        
+        // Refresh CodeLens when index is updated
+        indexManager.onIndexUpdated(() => {
+            if (codeLensProvider) {
+                codeLensProvider.refresh();
             }
-        }
-    );
+        });
 
-    const goToOverridesCommand = vscode.commands.registerCommand(
-        'pythonInheritance.goToOverrides',
-        async (overrideMethods: unknown) => {
-            if (commandHandlers) {
-                await commandHandlers.goToOverrides(overrideMethods as Array<{
-                    file_path: string;
-                    line: number;
-                    column: number;
-                    end_line: number;
-                    end_column: number;
-                    class_name: string;
-                    name: string;
-                }>);
+        const codeLensDisposable = vscode.languages.registerCodeLensProvider(
+            { language: 'python' },
+            codeLensProvider
+        );
+
+        const hoverDisposable = vscode.languages.registerHoverProvider(
+            { language: 'python' },
+            hoverProvider
+        );
+
+        const goToBaseCommand = vscode.commands.registerCommand(
+            'pythonInheritance.goToBase',
+            async (method: unknown) => {
+                if (commandHandlers) {
+                    await commandHandlers.goToBaseMethod(method as {
+                        file_path: string;
+                        line: number;
+                        column: number;
+                        end_line: number;
+                        end_column: number;
+                        class_name: string;
+                        name: string;
+                    });
+                }
             }
-        }
-    );
+        );
 
-    const refreshIndexCommand = vscode.commands.registerCommand(
-        'pythonInheritance.refreshIndex',
-        async () => {
-            if (commandHandlers) {
-                await commandHandlers.refreshIndex();
+        const goToOverridesCommand = vscode.commands.registerCommand(
+            'pythonInheritance.goToOverrides',
+            async (overrideMethods: unknown) => {
+                if (commandHandlers) {
+                    await commandHandlers.goToOverrides(overrideMethods as Array<{
+                        file_path: string;
+                        line: number;
+                        column: number;
+                        end_line: number;
+                        end_column: number;
+                        class_name: string;
+                        name: string;
+                    }>);
+                }
+            }
+        );
+
+        const refreshIndexCommand = vscode.commands.registerCommand(
+            'pythonInheritance.refreshIndex',
+            async () => {
+                if (commandHandlers) {
+                    await commandHandlers.refreshIndex();
+                    if (codeLensProvider) {
+                        codeLensProvider.refresh();
+                    }
+                }
+            }
+        );
+
+        const cleanAndReindexCommand = vscode.commands.registerCommand(
+            'pythonInheritance.cleanAndReindex',
+            async () => {
+                if (commandHandlers) {
+                    await commandHandlers.cleanAndReindex();
+                    if (codeLensProvider) {
+                        codeLensProvider.refresh();
+                    }
+                }
+            }
+        );
+
+        const openIndexFileCommand = vscode.commands.registerCommand(
+            'pythonInheritance.openIndexFile',
+            async () => {
+                if (commandHandlers) {
+                    await commandHandlers.openIndexFile();
+                }
+            }
+        );
+
+        const navigateToLocationCommand = vscode.commands.registerCommand(
+            'pythonInheritance.navigateToLocation',
+            async (filePath: string, line: number, column: number) => {
+                if (commandHandlers) {
+                    await commandHandlers.navigateToLocation(filePath, line, column);
+                }
+            }
+        );
+
+        context.subscriptions.push(
+            codeLensDisposable,
+            hoverDisposable,
+            goToBaseCommand,
+            goToOverridesCommand,
+            refreshIndexCommand,
+            cleanAndReindexCommand,
+            openIndexFileCommand,
+            navigateToLocationCommand
+        );
+
+        vscode.workspace.onDidChangeConfiguration((e) => {
+            if (e.affectsConfiguration('pythonInheritance')) {
+                // Handle logger configuration changes
+                if (e.affectsConfiguration('pythonInheritance.saveLogToFile') || 
+                    e.affectsConfiguration('pythonInheritance.showOutputChannel')) {
+                    const newConfig = vscode.workspace.getConfiguration('pythonInheritance');
+                    const newSaveLogToFile = newConfig.get<boolean>('saveLogToFile', false);
+                    const newShowOutputChannel = newConfig.get<boolean>('showOutputChannel', false);
+                    // Update logger with new settings
+                    const updatedLogger = initializeLogger(newSaveLogToFile, newShowOutputChannel);
+                    updatedLogger.info('Logger configuration updated', { 
+                        saveLogToFile: newSaveLogToFile, 
+                        showOutputChannel: newShowOutputChannel 
+                    });
+                }
+                
                 if (codeLensProvider) {
                     codeLensProvider.refresh();
                 }
             }
-        }
-    );
+        });
 
-    const cleanAndReindexCommand = vscode.commands.registerCommand(
-        'pythonInheritance.cleanAndReindex',
-        async () => {
-            if (commandHandlers) {
-                await commandHandlers.cleanAndReindex();
+        // Initialize index (progress bar is shown inside initialize())
+        indexManager.initialize().then(() => {
+            logger.info('Index initialization completed successfully');
+            // Refresh CodeLens after a short delay to ensure index is fully ready
+            setTimeout(() => {
                 if (codeLensProvider) {
                     codeLensProvider.refresh();
+                    logger.info('CodeLens refreshed after indexing');
                 }
-            }
-        }
-    );
-
-    const openIndexFileCommand = vscode.commands.registerCommand(
-        'pythonInheritance.openIndexFile',
-        async () => {
-            if (commandHandlers) {
-                await commandHandlers.openIndexFile();
-            }
-        }
-    );
-
-    const navigateToLocationCommand = vscode.commands.registerCommand(
-        'pythonInheritance.navigateToLocation',
-        async (filePath: string, line: number, column: number) => {
-            if (commandHandlers) {
-                await commandHandlers.navigateToLocation(filePath, line, column);
-            }
-        }
-    );
-
-    context.subscriptions.push(
-        codeLensDisposable,
-        hoverDisposable,
-        goToBaseCommand,
-        goToOverridesCommand,
-        refreshIndexCommand,
-        cleanAndReindexCommand,
-        openIndexFileCommand,
-        navigateToLocationCommand
-    );
-
-    vscode.workspace.onDidChangeConfiguration((e) => {
-        if (e.affectsConfiguration('pythonInheritance')) {
-            // Handle logger configuration changes
-            if (e.affectsConfiguration('pythonInheritance.saveLogToFile') || 
-                e.affectsConfiguration('pythonInheritance.showOutputChannel')) {
-                const newConfig = vscode.workspace.getConfiguration('pythonInheritance');
-                const newSaveLogToFile = newConfig.get<boolean>('saveLogToFile', false);
-                const newShowOutputChannel = newConfig.get<boolean>('showOutputChannel', false);
-                // Update logger with new settings
-                const updatedLogger = initializeLogger(newSaveLogToFile, newShowOutputChannel);
-                updatedLogger.info('Logger configuration updated', { 
-                    saveLogToFile: newSaveLogToFile, 
-                    showOutputChannel: newShowOutputChannel 
-                });
-            }
-            
-            if (codeLensProvider) {
-                codeLensProvider.refresh();
-            }
-        }
-    });
-
-    // Initialize index (progress bar is shown inside initialize())
-    indexManager.initialize().then(() => {
-        logger.info('Index initialization completed successfully');
-        // Refresh CodeLens after a short delay to ensure index is fully ready
-        setTimeout(() => {
-            if (codeLensProvider) {
-                codeLensProvider.refresh();
-                logger.info('CodeLens refreshed after indexing');
-            }
-        }, 500);
-        // Don't show info message - progress notification already shows completion
-    }).catch((error) => {
-        logger.error('Failed to initialize index', error);
-        console.error('Failed to initialize index:', error);
-        const errorMessage = error instanceof Error ? error.message : String(error);
-        vscode.window.showErrorMessage(`Failed to initialize Python Inheritance Navigator: ${errorMessage}`);
-    });
+            }, 500);
+            // Don't show info message - progress notification already shows completion
+        }).catch((error) => {
+            logger.error('Failed to initialize index', error);
+            console.error('Failed to initialize index:', error);
+            const errorMessage = error instanceof Error ? error.message : String(error);
+            vscode.window.showErrorMessage(`Failed to initialize Python Inheritance Navigator: ${errorMessage}`);
+        });
+    })();
 }
 
 export function deactivate() {
