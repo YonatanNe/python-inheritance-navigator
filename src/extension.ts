@@ -9,6 +9,17 @@ import { initializeLogger, getLogger } from './utils/logger';
 import { countGitRepos } from './utils/gitRepoDetector';
 import { VenvManager } from './utils/venvManager';
 
+function _getWorkspaceHash(workspaceRoot: string): string {
+    // Create a simple hash from workspace path for file naming
+    let hash = 0;
+    for (let i = 0; i < workspaceRoot.length; i++) {
+        const char = workspaceRoot.charCodeAt(i);
+        hash = ((hash << 5) - hash) + char;
+        hash = hash & hash; // Convert to 32-bit integer
+    }
+    return Math.abs(hash).toString(36);
+}
+
 let indexManager: InheritanceIndexManager | null = null;
 let codeLensProvider: InheritanceCodeLensProvider | null = null;
 let hoverProvider: InheritanceHoverProvider | null = null;
@@ -77,6 +88,30 @@ export function activate(context: vscode.ExtensionContext) {
         // Initialize venv manager and ensure venv is set up (async initialization)
         (async () => {
             venvManager = new VenvManager(storagePath, extensionPath);
+            
+            // Check if venv exists
+            const venvExists = venvManager.venvExists();
+            
+            // Check if index file exists (compute workspace hash to get index file path)
+            const workspaceHash = _getWorkspaceHash(workspaceRoot);
+            const indexFilePath = path.join(storagePath, `inheritance-index-${workspaceHash}.json`);
+            const indexExists = fs.existsSync(indexFilePath);
+            
+            // Only show initialization notification if work needs to be done
+            const needsWork = !venvExists || !indexExists;
+            
+            if (needsWork) {
+                // Show single initialization notification
+                vscode.window.showInformationMessage(
+                    'Python Inheritance Navigator: Initializing extension. A notification will appear when setup is complete.',
+                    'View Log'
+                ).then(selection => {
+                    if (selection === 'View Log') {
+                        logger.showOutputChannel();
+                    }
+                });
+            }
+
             let pythonPath: string;
 
             try {
@@ -103,18 +138,11 @@ export function activate(context: vscode.ExtensionContext) {
             }
         });
 
-        // Register CodeLens provider after a short delay to ensure it appears after git blame CodeLens
-        // This ensures our extension's CodeLens text appears last (after git text)
-        let codeLensDisposable: vscode.Disposable | undefined;
-        setTimeout(() => {
-            if (codeLensProvider) {
-                codeLensDisposable = vscode.languages.registerCodeLensProvider(
-                    { language: 'python' },
-                    codeLensProvider
-                );
-                context.subscriptions.push(codeLensDisposable);
-            }
-        }, 100);
+        // Register CodeLens provider
+        const codeLensDisposable = vscode.languages.registerCodeLensProvider(
+            { language: 'python' },
+            codeLensProvider
+        );
 
         const hoverDisposable = vscode.languages.registerHoverProvider(
             { language: 'python' },
@@ -219,7 +247,7 @@ export function activate(context: vscode.ExtensionContext) {
         );
 
         context.subscriptions.push(
-            // codeLensDisposable is added in setTimeout above to ensure it appears after git blame
+            codeLensDisposable,
             hoverDisposable,
             goToBaseCommand,
             goToOverridesCommand,

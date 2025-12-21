@@ -211,16 +211,6 @@ export class InheritanceIndexManager {
 
         this._isIndexing = true;
         
-        // Show simple notification that indexing is starting
-        vscode.window.showInformationMessage(
-            'Python Inheritance Navigator: Indexing is running in the background. A notification will appear when indexing is complete.',
-            'View Log'
-        ).then(selection => {
-            if (selection === 'View Log') {
-                logger.showOutputChannel();
-            }
-        });
-        
         // Start indexing in background (no progress bar)
         this.indexingPromise = (async () => {
             try {
@@ -1017,13 +1007,8 @@ export class InheritanceIndexManager {
         this._isIndexing = true;
 
         vscode.window.showInformationMessage(
-            'Python Inheritance Navigator: Refreshing index in the background. A notification will appear when indexing is complete.',
-            'View Log'
-        ).then(selection => {
-            if (selection === 'View Log') {
-                logger.showOutputChannel();
-            }
-        });
+            'Python Inheritance Navigator: Refreshing index in the background. A notification will appear when indexing is complete.'
+        );
 
         try {
             await this._performIndexing(indexingScope);
@@ -1033,13 +1018,8 @@ export class InheritanceIndexManager {
 
             // Show success notification
             vscode.window.showInformationMessage(
-                `Python Inheritance Navigator: Index refreshed - found inheritance in ${fileCount} files`,
-                'View Log'
-            ).then(selection => {
-                if (selection === 'View Log') {
-                    logger.showOutputChannel();
-                }
-            });
+                `Python Inheritance Navigator: Index refreshed - found inheritance in ${fileCount} files`
+            );
 
             // Save index to file
             this._saveIndexToFile();
@@ -1073,13 +1053,8 @@ export class InheritanceIndexManager {
         this._isIndexing = true;
 
         vscode.window.showInformationMessage(
-            'Python Inheritance Navigator: Cleaning and rebuilding index in the background. A notification will appear when indexing is complete.',
-            'View Log'
-        ).then(selection => {
-            if (selection === 'View Log') {
-                logger.showOutputChannel();
-            }
-        });
+            'Python Inheritance Navigator: Cleaning and rebuilding index in the background. A notification will appear when indexing is complete.'
+        );
 
         try {
             await this._performIndexing(indexingScope);
@@ -1089,13 +1064,8 @@ export class InheritanceIndexManager {
 
             // Show success notification
             vscode.window.showInformationMessage(
-                `Python Inheritance Navigator: Index cleaned and rebuilt - found inheritance in ${fileCount} files`,
-                'View Log'
-            ).then(selection => {
-                if (selection === 'View Log') {
-                    logger.showOutputChannel();
-                }
-            });
+                `Python Inheritance Navigator: Index cleaned and rebuilt - found inheritance in ${fileCount} files`
+            );
 
             // Save new index to file
             this._saveIndexToFile();

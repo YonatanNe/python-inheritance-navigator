@@ -2,7 +2,7 @@
   "name": "python-inheritance-navigator",
   "displayName": "Python Inheritance Navigator",
   "description": "Navigate Python method inheritance with Go to Base Method and Go to Overrides commands",
-  "version": "0.1.20",
+  "version": "0.1.21",
   "publisher": "YonatanNethanel",
   "repository": {
     "type": "git",
@@ -32,23 +32,23 @@
       },
       {
         "command": "pythonInheritance.refreshIndex",
-        "title": "Refresh Inheritance Index"
+        "title": "Refresh Inheritance Index (Python Inheritance Navigator)"
       },
       {
         "command": "pythonInheritance.cleanAndReindex",
-        "title": "Clean and Reindex"
+        "title": "Clean and Reindex (Python Inheritance Navigator)"
       },
       {
         "command": "pythonInheritance.openIndexFile",
-        "title": "Open Index File"
+        "title": "Open Index File (Python Inheritance Navigator)"
       },
       {
         "command": "pythonInheritance.clearAllIndexes",
-        "title": "Clear All Indexes"
+        "title": "Clear All Indexes (Python Inheritance Navigator)"
       },
       {
         "command": "pythonInheritance.removeExtensionVenv",
-        "title": "Remove Extension Virtual Environment"
+        "title": "Remove Extension Virtual Environment (Python Inheritance Navigator)"
       },
       {
         "command": "pythonInheritance.navigateToLocation",

@@ -40,6 +40,13 @@ export class VenvManager {
     }
 
     /**
+     * Checks if the venv already exists
+     */
+    venvExists(): boolean {
+        return fs.existsSync(this.venvPythonPath);
+    }
+
+    /**
      * Ensures the venv exists and is set up with required dependencies
      * Shows progress notification if venv needs to be created
      */
@@ -50,64 +57,49 @@ export class VenvManager {
             return this.venvPythonPath;
         }
 
-        // Slow path: create venv (show progress)
-        return vscode.window.withProgress({
-            location: vscode.ProgressLocation.Notification,
-            title: 'Python Inheritance Navigator',
-            cancellable: false
-        }, async (progress) => {
-            progress.report({ increment: 0, message: 'Initializing extension...' });
-            
-            try {
-                // Create venv directory if it doesn't exist
-                const venvDir = path.dirname(this.venvPath);
-                if (!fs.existsSync(venvDir)) {
-                    fs.mkdirSync(venvDir, { recursive: true });
-                }
-
-                // Find system Python
-                const systemPython = await this.findAvailablePython();
-                if (!systemPython) {
-                    const platform = process.platform;
-                    let installInstructions = 'Please install Python 3.10 or 3.11 (required for match statement support).';
-
-                    if (platform === 'darwin') {
-                        installInstructions += '\n\nmacOS options:\n• Homebrew: brew install python@3.11 (or python@3.10)\n• pyenv: pyenv install 3.11 && pyenv global 3.11\n• Download from: https://www.python.org/downloads/';
-                    } else if (platform === 'win32') {
-                        installInstructions += '\n\nWindows options:\n• Download from: https://www.python.org/downloads/\n• Chocolatey: choco install python311\n• Microsoft Store: Search for "Python 3.11"';
-                    } else {
-                        installInstructions += '\n\nLinux options:\n• Ubuntu/Debian: sudo apt install python3.11\n• CentOS/RHEL: sudo yum install python311\n• Arch: sudo pacman -S python311\n• Or download from: https://www.python.org/downloads/';
-                    }
-
-                    throw new Error(`Could not find Python 3.10 or 3.11 executable.\n\n${installInstructions}`);
-                }
-
-                logger.info('Creating venv', { systemPython, venvPath: this.venvPath });
-
-                // Create venv
-                progress.report({ increment: 10, message: 'Initializing extension...' });
-                await this.createVenv(systemPython);
-                
-                progress.report({ increment: 30, message: 'Initializing extension...' });
-
-                // Install dependencies
-                progress.report({ increment: 40, message: 'Initializing extension...' });
-                await this.installDependencies();
-                
-                progress.report({ increment: 90, message: 'Initializing extension...' });
-
-                // Verify installation
-                await this.verifyVenv();
-                
-                progress.report({ increment: 100, message: 'Initializing extension...' });
-                
-                logger.info('Venv setup completed', { venvPythonPath: this.venvPythonPath });
-                return this.venvPythonPath;
-            } catch (error) {
-                logger.error('Failed to setup venv', error);
-                throw error;
+        // Slow path: create venv (no notification - handled at extension level)
+        try {
+            // Create venv directory if it doesn't exist
+            const venvDir = path.dirname(this.venvPath);
+            if (!fs.existsSync(venvDir)) {
+                fs.mkdirSync(venvDir, { recursive: true });
             }
-        });
+
+            // Find system Python
+            const systemPython = await this.findAvailablePython();
+            if (!systemPython) {
+                const platform = process.platform;
+                let installInstructions = 'Please install Python 3.10 or 3.11 (required for match statement support).';
+
+                if (platform === 'darwin') {
+                    installInstructions += '\n\nmacOS options:\n• Homebrew: brew install python@3.11 (or python@3.10)\n• pyenv: pyenv install 3.11 && pyenv global 3.11\n• Download from: https://www.python.org/downloads/';
+                } else if (platform === 'win32') {
+                    installInstructions += '\n\nWindows options:\n• Download from: https://www.python.org/downloads/\n• Chocolatey: choco install python311\n• Microsoft Store: Search for "Python 3.11"';
+                } else {
+                    installInstructions += '\n\nLinux options:\n• Ubuntu/Debian: sudo apt install python3.11\n• CentOS/RHEL: sudo yum install python311\n• Arch: sudo pacman -S python311\n• Or download from: https://www.python.org/downloads/';
+                }
+
+                throw new Error(`Could not find Python 3.10 or 3.11 executable.\n\n${installInstructions}`);
+            }
+
+            logger.info('Creating venv', { systemPython, venvPath: this.venvPath });
+
+            // Create venv
+            await this.createVenv(systemPython);
+
+            // Install dependencies
+            await this.installDependencies();
+
+            // Verify installation
+            await this.verifyVenv();
+
+            logger.info('Venv setup completed', { venvPythonPath: this.venvPythonPath });
+
+            return this.venvPythonPath;
+        } catch (error) {
+            logger.error('Failed to setup venv', error);
+            throw error;
+        }
     }
 
     private async findAvailablePython(): Promise<string | null> {
@@ -303,13 +295,6 @@ export class VenvManager {
      */
     getPythonPath(): string {
         return this.venvPythonPath;
-    }
-
-    /**
-     * Checks if the venv exists
-     */
-    venvExists(): boolean {
-        return fs.existsSync(this.venvPythonPath);
     }
 
     /**
