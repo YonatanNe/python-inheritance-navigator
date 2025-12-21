@@ -10,6 +10,10 @@ export class PythonClient {
     private analyzerPath: string;
     private workspaceRoot: string;
     public indexingStats: { totalScanned?: number; filesWithInheritance?: number } = {};
+    
+    getIndexingStats(): { totalScanned?: number; filesWithInheritance?: number } {
+        return { ...this.indexingStats };
+    }
 
     constructor(workspaceRoot: string, pythonPath = 'python3', extensionPath?: string) {
         this.workspaceRoot = workspaceRoot;
@@ -54,38 +58,94 @@ export class PythonClient {
 
             let stdout = '';
             let stderr = '';
+            let hasOutput = false;
+            
+            // Add timeout (30 minutes for large workspaces)
+            const timeout = setTimeout(() => {
+                if (!hasOutput) {
+                    logger.error('Python analyzer timeout - no output received', { timeoutMs: 30 * 60 * 1000 });
+                    process.kill('SIGTERM');
+                    reject(new Error('Python analyzer timed out after 30 minutes. The workspace may be too large. Try using "Clean and Reindex" command.'));
+                }
+            }, 30 * 60 * 1000);
 
             process.stdout.on('data', (data) => {
                 stdout += data.toString();
             });
 
             process.stderr.on('data', (data) => {
+                hasOutput = true;
                 const stderrData = data.toString();
                 stderr += stderrData;
-                // Parse stats from stderr if present
-                if (stderrData.includes('[STATS]')) {
-                    const statsMatch = stderrData.match(/Scanned (\d+) Python files, found inheritance in (\d+) files/);
-                    if (statsMatch) {
-                        this.indexingStats.totalScanned = parseInt(statsMatch[1], 10);
-                        this.indexingStats.filesWithInheritance = parseInt(statsMatch[2], 10);
-                        logger.info('Indexing statistics', { 
-                            totalScanned: this.indexingStats.totalScanned, 
-                            filesWithInheritance: this.indexingStats.filesWithInheritance 
-                        });
+                
+                // Log warnings and errors from Python analyzer
+                const lines = stderrData.split('\n').filter((line: string) => line.trim());
+                for (const line of lines) {
+                    // Skip traceback lines and common expected warnings to reduce noise
+                    if (line.includes('Traceback') || line.startsWith('  File ') || line.startsWith('    ')) {
+                        // Skip traceback lines - they're too verbose
+                        continue;
+                    }
+                    // Only log actual errors, not expected MRO warnings for test classes
+                    if (line.includes('Error analyzing') && !line.includes('list index out of range')) {
+                        logger.warn('Python analyzer error', { line, filePath: this.workspaceRoot });
+                    } else if (line.includes('[STATS]')) {
+                        // Parse stats from stderr if present
+                        const statsMatch = line.match(/Scanned (\d+) Python files, found inheritance in (\d+) files/);
+                        if (statsMatch) {
+                            this.indexingStats.totalScanned = parseInt(statsMatch[1], 10);
+                            this.indexingStats.filesWithInheritance = parseInt(statsMatch[2], 10);
+                            logger.info('Python analyzer statistics', { 
+                                totalScanned: this.indexingStats.totalScanned, 
+                                filesWithInheritance: this.indexingStats.filesWithInheritance 
+                            });
+                        }
+                    } else if (line.includes('[PROGRESS]')) {
+                        // Parse progress updates - can be file progress or relationship computation progress
+                        const fileProgressMatch = line.match(/\[PROGRESS\] (\d+)\/(\d+) files(?: \((\d+)%\))?/);
+                        const relationshipProgressMatch = line.match(/\[PROGRESS\] Computing relationships: (\d+)\/(\d+) classes(?: \((\d+)%\))?/);
+                        const allFilesAnalyzedMatch = line.match(/\[PROGRESS\] All files analyzed\. Computing relationships for (\d+) classes/);
+                        
+                        if (fileProgressMatch) {
+                            const current = parseInt(fileProgressMatch[1], 10);
+                            const total = parseInt(fileProgressMatch[2], 10);
+                            const percent = fileProgressMatch[3] ? parseInt(fileProgressMatch[3], 10) : Math.round((current / total) * 100);
+                            // Update stats immediately so progress bar can use them
+                            this.indexingStats.totalScanned = current;
+                            logger.info('Python analyzer progress', { current, total, percent });
+                        } else if (relationshipProgressMatch) {
+                            const current = parseInt(relationshipProgressMatch[1], 10);
+                            const total = parseInt(relationshipProgressMatch[2], 10);
+                            const percent = relationshipProgressMatch[3] ? parseInt(relationshipProgressMatch[3], 10) : Math.round((current / total) * 100);
+                            logger.info('Python analyzer computing relationships', { current, total, percent });
+                        } else if (allFilesAnalyzedMatch) {
+                            const totalClasses = parseInt(allFilesAnalyzedMatch[1], 10);
+                            logger.info('Python analyzer starting relationship computation', { totalClasses });
+                        }
+                    } else if (line.trim() && !line.includes('Warning:') && !line.includes('Error')) {
+                        // Log other non-warning, non-error stderr output as debug
+                        logger.debug('Python analyzer', { line });
                     }
                 }
             });
 
             process.on('close', (code) => {
+                clearTimeout(timeout);
                 logger.debug('Python process closed', { code, stdoutLength: stdout.length, stderrLength: stderr.length });
                 
                 if (code !== 0) {
-                    logger.error('Python analyzer failed', { code, stderr });
-                    reject(new Error(`Python analyzer exited with code ${code}: ${stderr}`));
+                    logger.error('Python analyzer failed', { code, stderr: stderr.substring(0, 1000) });
+                    reject(new Error(`Python analyzer exited with code ${code}: ${stderr.substring(0, 500)}`));
                     return;
                 }
 
                 try {
+                    if (!stdout || stdout.trim().length === 0) {
+                        logger.error('Python analyzer returned empty output', { stderr: stderr.substring(0, 500) });
+                        reject(new Error('Python analyzer returned empty output. Check Python environment and dependencies.'));
+                        return;
+                    }
+                    
                     const result = JSON.parse(stdout);
                     const fileCount = Object.keys(result).length;
                     logger.info('Workspace analysis completed', { 
@@ -94,12 +154,18 @@ export class PythonClient {
                     });
                     resolve(result as InheritanceIndex);
                 } catch (error) {
-                    logger.error('Failed to parse analyzer output', { error, stdout: stdout.substring(0, 500) });
-                    reject(new Error(`Failed to parse analyzer output: ${error}`));
+                    logger.error('Failed to parse analyzer output', { 
+                        error, 
+                        stdoutLength: stdout.length,
+                        stdoutPreview: stdout.substring(0, 500),
+                        stderrPreview: stderr.substring(0, 500)
+                    });
+                    reject(new Error(`Failed to parse analyzer output: ${error}. Output length: ${stdout.length}`));
                 }
             });
 
             process.on('error', (error) => {
+                clearTimeout(timeout);
                 logger.error('Failed to spawn Python process', { 
                     error, 
                     pythonPath: this.pythonPath, 
@@ -131,7 +197,22 @@ export class PythonClient {
             });
 
             process.stderr.on('data', (data) => {
-                stderr += data.toString();
+                const stderrData = data.toString();
+                stderr += stderrData;
+                
+                // Log warnings and errors from Python analyzer
+                const lines = stderrData.split('\n').filter((line: string) => line.trim());
+                for (const line of lines) {
+                    // Skip traceback lines and common expected warnings to reduce noise
+                    if (line.includes('Traceback') || line.startsWith('  File ') || line.startsWith('    ')) {
+                        // Skip traceback lines - they're too verbose
+                        continue;
+                    }
+                    // Only log actual errors, not expected MRO warnings for test classes
+                    if (line.includes('Error analyzing') && !line.includes('list index out of range')) {
+                        logger.warn('Python analyzer output', { line, filePath });
+                    }
+                }
             });
 
             process.on('close', (code) => {
@@ -187,16 +268,29 @@ export class PythonClient {
             process.stderr.on('data', (data) => {
                 const stderrData = data.toString();
                 stderr += stderrData;
-                // Parse stats from stderr if present
-                if (stderrData.includes('[STATS]')) {
-                    const statsMatch = stderrData.match(/Scanned (\d+) Python files, found inheritance in (\d+) files/);
-                    if (statsMatch) {
-                        this.indexingStats.totalScanned = parseInt(statsMatch[1], 10);
-                        this.indexingStats.filesWithInheritance = parseInt(statsMatch[2], 10);
-                        logger.info('Batch indexing statistics', { 
-                            totalScanned: this.indexingStats.totalScanned, 
-                            filesWithInheritance: this.indexingStats.filesWithInheritance 
-                        });
+                
+                // Log warnings and errors from Python analyzer
+                const lines = stderrData.split('\n').filter((line: string) => line.trim());
+                for (const line of lines) {
+                    // Skip traceback lines and common expected warnings to reduce noise
+                    if (line.includes('Traceback') || line.startsWith('  File ') || line.startsWith('    ')) {
+                        // Skip traceback lines - they're too verbose
+                        continue;
+                    }
+                    // Only log actual errors, not expected MRO warnings for test classes
+                    if (line.includes('Error analyzing') && !line.includes('list index out of range')) {
+                        logger.warn('Python analyzer output', { line });
+                    } else if (line.includes('[STATS]')) {
+                        // Parse stats from stderr if present
+                        const statsMatch = line.match(/Scanned (\d+) Python files, found inheritance in (\d+) files/);
+                        if (statsMatch) {
+                            this.indexingStats.totalScanned = parseInt(statsMatch[1], 10);
+                            this.indexingStats.filesWithInheritance = parseInt(statsMatch[2], 10);
+                            logger.info('Batch indexing statistics', { 
+                                totalScanned: this.indexingStats.totalScanned, 
+                                filesWithInheritance: this.indexingStats.filesWithInheritance 
+                            });
+                        }
                     }
                 }
             });

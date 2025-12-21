@@ -2,15 +2,24 @@ import * as assert from 'assert';
 import * as vscode from 'vscode';
 import { CommandHandlers } from '../../commands';
 import { InheritanceIndexManager } from '../../index';
+import { VenvManager } from '../../utils/venvManager';
 
 suite('Command Handlers Tests', () => {
     let indexManager: InheritanceIndexManager;
     let commandHandlers: CommandHandlers;
+    let venvManager: VenvManager;
     const testWorkspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || __dirname;
 
     setup(() => {
         indexManager = new InheritanceIndexManager(testWorkspaceRoot, 'python3');
-        commandHandlers = new CommandHandlers(indexManager);
+        // Create a mock VenvManager for testing
+        venvManager = {
+            ensureVenv: async () => '/mock/python/path',
+            removeVenv: () => { /* mock implementation */ },
+            getPythonPath: () => '/mock/python/path',
+            venvExists: () => true
+        } as VenvManager;
+        commandHandlers = new CommandHandlers(indexManager, venvManager);
     });
 
     teardown(() => {

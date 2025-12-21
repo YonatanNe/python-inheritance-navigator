@@ -68,7 +68,18 @@ export class VenvManager {
                 // Find system Python
                 const systemPython = await this.findAvailablePython();
                 if (!systemPython) {
-                    throw new Error('Could not find Python 3.6+ executable. Please install Python 3.6 or higher.');
+                    const platform = process.platform;
+                    let installInstructions = 'Please install Python 3.10 or 3.11 (required for match statement support).';
+
+                    if (platform === 'darwin') {
+                        installInstructions += '\n\nmacOS options:\n• Homebrew: brew install python@3.11 (or python@3.10)\n• pyenv: pyenv install 3.11 && pyenv global 3.11\n• Download from: https://www.python.org/downloads/';
+                    } else if (platform === 'win32') {
+                        installInstructions += '\n\nWindows options:\n• Download from: https://www.python.org/downloads/\n• Chocolatey: choco install python311\n• Microsoft Store: Search for "Python 3.11"';
+                    } else {
+                        installInstructions += '\n\nLinux options:\n• Ubuntu/Debian: sudo apt install python3.11\n• CentOS/RHEL: sudo yum install python311\n• Arch: sudo pacman -S python311\n• Or download from: https://www.python.org/downloads/';
+                    }
+
+                    throw new Error(`Could not find Python 3.10 or 3.11 executable.\n\n${installInstructions}`);
                 }
 
                 logger.info('Creating venv', { systemPython, venvPath: this.venvPath });
@@ -100,21 +111,34 @@ export class VenvManager {
     }
 
     private async findAvailablePython(): Promise<string | null> {
-        const candidates = process.platform === 'win32' 
+        // Build list of candidates: specific versions first, then generic ones
+        // Support Python 3.10 and 3.11 (required for match statements)
+        const specificVersions = ['python3.11', 'python3.10'];
+        const genericCandidates = process.platform === 'win32'
             ? ['python', 'python3', 'py']
             : ['python3', 'python'];
+        
+        const candidates = [...specificVersions, ...genericCandidates];
+
+        // Collect all available Python executables with their versions
+        const availablePythons: Array<{candidate: string, version: string, major: number, minor: number}> = [];
 
         for (const candidate of candidates) {
             try {
                 const { stdout } = await execAsync(`${candidate} --version`);
-                // Check if version is 3.6 or higher
+                // Check if version is 3.10 or 3.11 (required for match statements)
                 const versionMatch = stdout.match(/Python (\d+)\.(\d+)/);
                 if (versionMatch) {
                     const major = parseInt(versionMatch[1], 10);
                     const minor = parseInt(versionMatch[2], 10);
-                    if (major === 3 && minor >= 6) {
-                        logger.info('Found suitable Python', { candidate, version: stdout.trim() });
-                        return candidate;
+                    // Require 3.10 or 3.11 (supports match statements)
+                    if (major === 3 && (minor === 10 || minor === 11)) {
+                        availablePythons.push({
+                            candidate,
+                            version: stdout.trim(),
+                            major,
+                            minor
+                        });
                     }
                 }
             } catch (error) {
@@ -123,7 +147,24 @@ export class VenvManager {
             }
         }
 
-        return null;
+        if (availablePythons.length === 0) {
+            return null;
+        }
+
+        // Sort by version (highest first) and return the best one
+        availablePythons.sort((a, b) => {
+            if (a.major !== b.major) return b.major - a.major;
+            return b.minor - a.minor;
+        });
+
+        const bestPython = availablePythons[0];
+        logger.info('Found suitable Python versions, using the highest available', {
+            selected: bestPython.candidate,
+            version: bestPython.version,
+            allAvailable: availablePythons.map(p => `${p.candidate} (${p.version})`)
+        });
+
+        return bestPython.candidate;
     }
 
     private async createVenv(pythonExecutable: string): Promise<void> {
@@ -170,35 +211,58 @@ export class VenvManager {
                 ? path.join(this.venvPath, 'Scripts', 'pip')
                 : path.join(this.venvPath, 'bin', 'pip');
 
-            const pipProcess = spawn(pipPath, ['install', '--quiet', '--disable-pip-version-check', '-r', this.requirementsPath], {
-                stdio: ['pipe', 'pipe', 'pipe']
-            });
+            // Install python-mro-language-server first (with its dependencies)
+            // Then force upgrade jedi and parso to versions compatible with Python 3.11
+            // Using --ignore-installed to override version constraints from python-mro-language-server
+            const installSteps = [
+                ['install', '--quiet', '--disable-pip-version-check', 'python-mro-language-server'],
+                ['install', '--quiet', '--disable-pip-version-check', '--upgrade', '--ignore-installed', 'jedi>=0.19.1', 'parso>=0.8.5']
+            ];
 
-            let stdout = '';
-            let stderr = '';
+            let currentStep = 0;
 
-            pipProcess.stdout.on('data', (data: Buffer) => {
-                stdout += data.toString();
-            });
-
-            pipProcess.stderr.on('data', (data: Buffer) => {
-                stderr += data.toString();
-            });
-
-            pipProcess.on('close', (code: number | null) => {
-                if (code !== 0) {
-                    logger.error('Failed to install dependencies', { code, stdout, stderr });
-                    reject(new Error(`Failed to install dependencies: ${stderr || stdout}`));
+            const runNextStep = () => {
+                if (currentStep >= installSteps.length) {
+                    logger.info('Dependencies installed successfully');
+                    resolve();
                     return;
                 }
-                logger.info('Dependencies installed successfully');
-                resolve();
-            });
 
-            pipProcess.on('error', (error: Error) => {
-                logger.error('Failed to spawn pip install process', error);
-                reject(new Error(`Failed to install dependencies: ${error.message}`));
-            });
+                const args = installSteps[currentStep];
+                logger.debug('Running pip install step', { step: currentStep + 1, args: args.slice(1) });
+                
+                const pipProcess = spawn(pipPath, args, {
+                    stdio: ['pipe', 'pipe', 'pipe']
+                });
+
+                let stdout = '';
+                let stderr = '';
+
+                pipProcess.stdout.on('data', (data: Buffer) => {
+                    stdout += data.toString();
+                });
+
+                pipProcess.stderr.on('data', (data: Buffer) => {
+                    stderr += data.toString();
+                });
+
+                pipProcess.on('close', (code: number | null) => {
+                    if (code !== 0) {
+                        logger.error('Failed to install dependencies', { step: currentStep + 1, code, stdout, stderr });
+                        reject(new Error(`Failed to install dependencies at step ${currentStep + 1}: ${stderr || stdout}`));
+                        return;
+                    }
+                    currentStep++;
+                    runNextStep();
+                });
+
+                pipProcess.on('error', (error: Error) => {
+                    logger.error('Failed to spawn pip install process', { step: currentStep + 1, error });
+                    reject(new Error(`Failed to install dependencies at step ${currentStep + 1}: ${error.message}`));
+                });
+            };
+
+            runNextStep();
         });
     }
 
@@ -246,6 +310,39 @@ export class VenvManager {
      */
     venvExists(): boolean {
         return fs.existsSync(this.venvPythonPath);
+    }
+
+    /**
+     * Removes the extension's virtual environment
+     */
+    removeVenv(): void {
+        if (fs.existsSync(this.venvPath)) {
+            logger.info('Removing extension venv', { venvPath: this.venvPath });
+            try {
+                // Use rimraf-style recursive deletion
+                const rimraf = (dirPath: string) => {
+                    if (fs.existsSync(dirPath)) {
+                        const files = fs.readdirSync(dirPath);
+                        for (const file of files) {
+                            const curPath = path.join(dirPath, file);
+                            if (fs.lstatSync(curPath).isDirectory()) {
+                                rimraf(curPath);
+                            } else {
+                                fs.unlinkSync(curPath);
+                            }
+                        }
+                        fs.rmdirSync(dirPath);
+                    }
+                };
+                rimraf(this.venvPath);
+                logger.info('Extension venv removed successfully');
+            } catch (error) {
+                logger.error('Failed to remove extension venv', error);
+                throw new Error(`Failed to remove virtual environment: ${error}`);
+            }
+        } else {
+            logger.info('Extension venv does not exist, nothing to remove');
+        }
     }
 }
 

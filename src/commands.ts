@@ -3,12 +3,16 @@ import * as path from 'path';
 import * as fs from 'fs';
 import { InheritanceIndexManager } from './index';
 import { MethodLocation } from './analysis/types';
+import { VenvManager } from './utils/venvManager';
+import { logger } from './utils/logger';
 
 export class CommandHandlers {
     private indexManager: InheritanceIndexManager;
+    private venvManager: VenvManager;
 
-    constructor(indexManager: InheritanceIndexManager) {
+    constructor(indexManager: InheritanceIndexManager, venvManager: VenvManager) {
         this.indexManager = indexManager;
+        this.venvManager = venvManager;
     }
 
     async goToBaseMethod(method: MethodLocation | MethodLocation[]): Promise<void> {
@@ -19,13 +23,109 @@ export class CommandHandlers {
                 return;
             }
             
-            if (method.length === 1) {
-                await this.goToBaseMethod(method[0]);
+            // Filter out invalid entries (empty file_path or line 0)
+            const validMethods = method.filter(m => m.file_path && m.line > 0);
+            
+            logger.debug('goToBaseMethod called with array', { 
+                totalMethods: method.length, 
+                validMethods: validMethods.length,
+                methods: method.map(m => ({ class: m.class_name, file: m.file_path, line: m.line }))
+            });
+            
+            if (validMethods.length === 0) {
+                // Try to find class definitions for all base classes
+                const foundLocations: MethodLocation[] = [];
+                for (const m of method) {
+                    const className = m.class_name || m.name;
+                    if (className) {
+                        try {
+                            // If we have a file_path but line is 0, try searching in that file first
+                            if (m.file_path && !m.line) {
+                                try {
+                                    const uri = vscode.Uri.file(m.file_path);
+                                    const document = await vscode.workspace.openTextDocument(uri);
+                                    for (let i = 0; i < document.lineCount; i++) {
+                                        const line = document.lineAt(i);
+                                        const trimmed = line.text.trim();
+                                        const match = trimmed.match(new RegExp(`^class\\s+${className.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*[:(]`));
+                                        if (match) {
+                                            foundLocations.push({
+                                                file_path: m.file_path,
+                                                class_name: className,
+                                                name: className,
+                                                line: i + 1,
+                                                column: line.firstNonWhitespaceCharacterIndex,
+                                                end_line: i + 1,
+                                                end_column: line.firstNonWhitespaceCharacterIndex
+                                            });
+                                            break;
+                                        }
+                                    }
+                                } catch (error) {
+                                    console.error(`Error searching file ${m.file_path} for class ${className}:`, error);
+                                }
+                            }
+                            
+                            // If still not found, try async lookup
+                            if (foundLocations.length === 0 || foundLocations[foundLocations.length - 1].class_name !== className) {
+                                const found = await this.indexManager.findClassDefinition(className);
+                                if (found && found.line > 0) {
+                                    foundLocations.push({
+                                        file_path: found.filePath,
+                                        class_name: className,
+                                        name: className,
+                                        line: found.line,
+                                        column: found.column,
+                                        end_line: found.line,
+                                        end_column: found.column
+                                    });
+                                }
+                            }
+                        } catch (error) {
+                            console.error(`Error finding class ${className}:`, error);
+                        }
+                    }
+                }
+                
+                if (foundLocations.length === 0) {
+                    const classNames = method.map(m => m.class_name || m.name).filter(Boolean).join(', ');
+                    vscode.window.showWarningMessage(`Could not locate base class definition${classNames ? ` (${classNames})` : ''}. The class may not be indexed yet.`);
+                    return;
+                }
+                
+                if (foundLocations.length === 1) {
+                    await this.goToBaseMethod(foundLocations[0]);
+                    return;
+                }
+                
+                // Show quick pick for multiple found locations
+                const items = foundLocations.map(m => ({
+                    label: m.class_name || m.name,
+                    description: m.file_path ? path.relative(
+                        vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '',
+                        m.file_path
+                    ) : 'Location unknown',
+                    detail: m.file_path ? `${m.file_path}:${m.line || 0}` : 'Location unknown',
+                    method: m
+                }));
+                
+                const selected = await vscode.window.showQuickPick(items, {
+                    placeHolder: 'Select base class to navigate to'
+                });
+                
+                if (selected) {
+                    await this.goToBaseMethod(selected.method);
+                }
+                return;
+            }
+            
+            if (validMethods.length === 1) {
+                await this.goToBaseMethod(validMethods[0]);
                 return;
             }
             
             // Show quick pick for multiple base classes
-            const items = method.map(m => ({
+            const items = validMethods.map(m => ({
                 label: m.class_name || m.name,
                 description: m.file_path ? path.relative(
                     vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '',
@@ -50,14 +150,18 @@ export class CommandHandlers {
             // Try to find the class definition in the workspace
             const className = method.class_name || method.name;
             if (className) {
-                const found = await this.indexManager.findClassDefinition(className);
-                if (found && found.line > 0) {
-                    await this.navigateToLocation(found.filePath, found.line, found.column);
-                    return;
+                try {
+                    const found = await this.indexManager.findClassDefinition(className);
+                    if (found && found.line > 0) {
+                        await this.navigateToLocation(found.filePath, found.line, found.column);
+                        return;
+                    }
+                } catch (error) {
+                    console.error(`Error finding class ${className}:`, error);
                 }
             }
             if (!method.file_path) {
-                vscode.window.showErrorMessage('Base method location not available');
+                vscode.window.showWarningMessage('Base method location not available. The class may not be indexed yet.');
                 return;
             }
             // If we have file_path but line is 0, search for the class in the file
@@ -81,7 +185,7 @@ export class CommandHandlers {
                     }
                 }
             }
-            vscode.window.showErrorMessage('Base method location not available');
+            vscode.window.showWarningMessage('Base method location not available. The class may not be indexed yet.');
             return;
         }
 
@@ -129,31 +233,13 @@ export class CommandHandlers {
     }
 
     async refreshIndex(): Promise<void> {
-        vscode.window.withProgress(
-            {
-                location: vscode.ProgressLocation.Notification,
-                title: 'Refreshing inheritance index...',
-                cancellable: false
-            },
-            async () => {
-                await this.indexManager.refreshIndex();
-                vscode.window.showInformationMessage('Inheritance index refreshed');
-            }
-        );
+        // The indexManager.refreshIndex() already shows notifications, so just call it directly
+        await this.indexManager.refreshIndex();
     }
 
     async cleanAndReindex(): Promise<void> {
-        vscode.window.withProgress(
-            {
-                location: vscode.ProgressLocation.Notification,
-                title: 'Cleaning and reindexing inheritance...',
-                cancellable: false
-            },
-            async () => {
-                await this.indexManager.cleanAndReindex();
-                vscode.window.showInformationMessage('Inheritance index cleaned and rebuilt');
-            }
-        );
+        // The indexManager.cleanAndReindex() already shows notifications, so just call it directly
+        await this.indexManager.cleanAndReindex();
     }
 
     async openIndexFile(): Promise<void> {
@@ -184,6 +270,26 @@ export class CommandHandlers {
 
         if (result === 'Clear All') {
             await this.indexManager.clearAllIndexes();
+        }
+    }
+
+    async removeExtensionVenv(): Promise<void> {
+        const result = await vscode.window.showWarningMessage(
+            'Are you sure you want to remove the extension\'s virtual environment? This will delete the Python venv and all installed packages. The extension will recreate it automatically when needed.',
+            { modal: true },
+            'Remove Venv',
+            'Cancel'
+        );
+
+        if (result === 'Remove Venv') {
+            try {
+                this.venvManager.removeVenv();
+                vscode.window.showInformationMessage('Extension virtual environment removed successfully. It will be recreated automatically when needed.');
+            } catch (error) {
+                const errorMessage = error instanceof Error ? error.message : String(error);
+                vscode.window.showErrorMessage(`Failed to remove virtual environment: ${errorMessage}`);
+                logger.error('Failed to remove extension venv', error);
+            }
         }
     }
 }

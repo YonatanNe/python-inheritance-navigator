@@ -2,7 +2,7 @@ import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
 import { PythonClient } from './analysis/pythonClient';
-import { InheritanceIndex, MethodRelationship, FileInheritanceData } from './analysis/types';
+import { InheritanceIndex, MethodRelationship, FileInheritanceData, ClassInheritance } from './analysis/types';
 import { FileWatcher } from './utils/fileWatcher';
 import { FileChangeQueue } from './utils/fileChangeQueue';
 import { BatchProgressDisplay } from './utils/batchProgressDisplay';
@@ -23,6 +23,8 @@ export class InheritanceIndexManager {
     private storagePath: string | null = null;
     private indexFilePath: string | null = null;
     private workspaceRoot: string;
+    private filesBeingIndexed: Set<string> = new Set(); // Track files currently being indexed on-demand
+    private filesWithSyntaxErrors: Set<string> = new Set(); // Track files that failed due to syntax errors
 
     isIndexing(): boolean {
         return this._isIndexing;
@@ -185,7 +187,10 @@ export class InheritanceIndexManager {
 
     async initialize(): Promise<void> {
         logger.info('Initializing inheritance index manager');
-        
+
+        // Clear syntax error tracking on initialization
+        this.filesWithSyntaxErrors.clear();
+
         // Try to load index from file first
         const loaded = await this.loadIndexFromFile();
         if (loaded) {
@@ -206,16 +211,20 @@ export class InheritanceIndexManager {
 
         this._isIndexing = true;
         
-        // Show progress notification
-        this.indexingPromise = vscode.window.withProgress({
-            location: vscode.ProgressLocation.Notification,
-            title: 'Python Inheritance Navigator',
-            cancellable: false
-        }, async (progress) => {
-            progress.report({ increment: 0, message: 'Starting indexing...' });
-            
+        // Show simple notification that indexing is starting
+        vscode.window.showInformationMessage(
+            'Python Inheritance Navigator: Indexing is running in the background. A notification will appear when indexing is complete.',
+            'View Log'
+        ).then(selection => {
+            if (selection === 'View Log') {
+                logger.showOutputChannel();
+            }
+        });
+        
+        // Start indexing in background (no progress bar)
+        this.indexingPromise = (async () => {
             try {
-                await this._performIndexing(indexingScope, progress);
+                await this._performIndexing(indexingScope);
                 logger.info('Index initialization completed');
                 
                 // Get file count for notification
@@ -229,9 +238,9 @@ export class InheritanceIndexManager {
                 // Build notification message with stats if available
                 let message: string;
                 if (this.indexingStats.totalScanned) {
-                    message = `Python Inheritance Navigator: Scanned ${this.indexingStats.totalScanned} Python files, found inheritance in ${fileCount} files`;
+                    message = `Python Inheritance Navigator: Indexing complete. Scanned ${this.indexingStats.totalScanned} Python files, found inheritance in ${fileCount} files`;
                 } else {
-                    message = `Python Inheritance Navigator: Found inheritance relationships in ${fileCount} files`;
+                    message = `Python Inheritance Navigator: Indexing complete. Found inheritance relationships in ${fileCount} files`;
                 }
                 
                 logger.info('Showing completion notification', { message, stats: this.indexingStats });
@@ -249,7 +258,7 @@ export class InheritanceIndexManager {
                 this._isIndexing = false;
                 this.indexingPromise = null;
             }
-        }) as Promise<void>;
+        })();
         
                 try {
                     await this.indexingPromise;
@@ -268,8 +277,9 @@ export class InheritanceIndexManager {
         this._setupFileWatcher();
     }
 
-    private async _performIndexing(scope: string, progress?: vscode.Progress<{ message?: string; increment?: number }>): Promise<void> {
-        logger.info('Starting indexing', { scope });
+    private async _performIndexing(scope: string): Promise<void> {
+        const startTime = Date.now();
+        logger.info('Starting indexing', { scope, startTime });
         try {
             if (scope === 'workspace') {
                 logger.debug('Indexing entire workspace');
@@ -277,48 +287,26 @@ export class InheritanceIndexManager {
                 if (shouldSkip) {
                     logger.warn('Indexing skipped because folder contains multiple Git repositories and skip setting is enabled');
                     vscode.window.showWarningMessage('Python Inheritance Navigator: Skipped indexing because the folder contains multiple Git repositories (adjust setting "Skip folders with multiple Git repos" to override)');
-                    progress?.report({ increment: 100, message: 'Indexing skipped (multiple Git repos detected)' });
                     return;
                 }
-                progress?.report({ increment: 0, message: 'Scanning workspace for Python files...' });
+                logger.info('Starting workspace indexing');
                 
                 // Start the analysis (it runs in background)
                 const analysisPromise = this.pythonClient.analyzeWorkspace();
-                
-                // Simulate progress updates while waiting (since we can't track Python process progress)
-                let progressValue = 10;
-                let intervalActive = true;
-                const progressInterval = setInterval(() => {
-                    if (intervalActive && progressValue < 90) {
-                        progressValue += 2;
-                        progress?.report({ increment: 2, message: 'Analyzing Python files...' });
-                    }
-                }, 300);
-                
-                try {
-                    // Wait for analysis to complete
-                    this.index = await analysisPromise;
-                    intervalActive = false;
-                    clearInterval(progressInterval);
                     
-                    const fileCount = Object.keys(this.index).length;
-                    logger.info('Workspace indexing completed', { fileCount });
+                // Wait for analysis to complete
+                this.index = await analysisPromise;
                     
-                    // Save index to file (do this before completing progress)
-                    this._saveIndexToFile();
+                const fileCount = Object.keys(this.index).length;
+                const stats = this.pythonClient.getIndexingStats();
+                logger.info('Workspace indexing completed', { 
+                    fileCount, 
+                    totalScanned: stats.totalScanned,
+                    filesWithInheritance: stats.filesWithInheritance
+                });
                     
-                    // Complete the progress to 100%
-                    const remaining = 100 - progressValue;
-                    if (remaining > 0) {
-                        progress?.report({ increment: remaining, message: `Found inheritance relationships in ${fileCount} files` });
-                    } else {
-                        progress?.report({ increment: 0, message: `Found inheritance relationships in ${fileCount} files` });
-                    }
-                } catch (error) {
-                    intervalActive = false;
-                    clearInterval(progressInterval);
-                    throw error;
-                }
+                // Save index to file
+                this._saveIndexToFile();
             } else {
                 logger.debug('Indexing open files only');
                 const openFiles = vscode.workspace.textDocuments
@@ -333,18 +321,9 @@ export class InheritanceIndexManager {
                     .map(doc => doc.uri.fsPath);
                 
                 logger.debug('Found open Python files', { count: openFiles.length });
-                progress?.report({ increment: 0, message: `Indexing ${openFiles.length} open files...` });
                 
-                const totalFiles = openFiles.length;
-                for (let i = 0; i < openFiles.length; i++) {
-                    const filePath = openFiles[i];
-                    const fileName = path.basename(filePath);
+                for (const filePath of openFiles) {
                     try {
-                        progress?.report({ 
-                            increment: (100 / totalFiles) * (i / totalFiles),
-                            message: `Analyzing ${fileName}... (${i + 1}/${totalFiles})`
-                        });
-                        
                         const fileIndex = await this.pythonClient.analyzeFile(filePath);
                         this._mergeIndex(fileIndex);
                         logger.debug('Indexed file', { filePath });
@@ -353,13 +332,16 @@ export class InheritanceIndexManager {
                         console.error(`Failed to index ${filePath}:`, error);
                     }
                 }
-                progress?.report({ increment: 100, message: 'Indexing completed!' });
             }
         } catch (error) {
-            logger.error('Failed to index workspace', error);
+            const duration = Date.now() - startTime;
+            logger.error('Failed to index workspace', { error, duration, scope });
             console.error('Failed to index workspace:', error);
-            progress?.report({ increment: 100, message: 'Indexing failed' });
-            vscode.window.showErrorMessage(`Failed to index Python files: ${error}`);
+            const errorMessage = error instanceof Error ? error.message : String(error);
+            vscode.window.showErrorMessage(`Failed to index Python files: ${errorMessage}`);
+        } finally {
+            const duration = Date.now() - startTime;
+            logger.info('Indexing completed', { scope, duration, indexFileCount: Object.keys(this.index).length });
         }
     }
 
@@ -439,6 +421,62 @@ export class InheritanceIndexManager {
         }
     }
     
+    private async _indexFileOnDemand(filePath: string): Promise<void> {
+        // Index a single file on-demand if it's not already in the index
+        if (filePath in this.index) {
+            return; // Already indexed
+        }
+
+        // Check if file has syntax errors (don't retry)
+        if (this.filesWithSyntaxErrors.has(filePath)) {
+            logger.debug('On-demand indexing skipped: file has syntax errors', { filePath });
+            return;
+        }
+
+        // Check if file is already being indexed (prevent duplicate requests)
+        if (this.filesBeingIndexed.has(filePath)) {
+            logger.debug('On-demand indexing skipped: file already being indexed', { filePath });
+            return;
+        }
+
+        // Check if file exists and is within workspace
+        if (!fs.existsSync(filePath)) {
+            logger.debug('On-demand indexing skipped: file does not exist', { filePath });
+            return;
+        }
+
+        if (!filePath.startsWith(this.workspaceRoot)) {
+            logger.debug('On-demand indexing skipped: file outside workspace', { filePath, workspaceRoot: this.workspaceRoot });
+            return;
+        }
+
+        // Mark file as being indexed
+        this.filesBeingIndexed.add(filePath);
+
+        try {
+            logger.debug('Indexing file on-demand', { filePath });
+            const fileIndex = await this.pythonClient.analyzeFile(filePath);
+            this._updateFileInIndex(filePath, fileIndex);
+            // Clear any previous syntax error marking since indexing succeeded
+            this.filesWithSyntaxErrors.delete(filePath);
+            logger.debug('On-demand indexing completed', { filePath });
+        } catch (error: any) {
+            logger.debug('On-demand indexing failed', { filePath, error });
+
+            // Check if error is due to syntax issues
+            const errorMessage = error?.message || String(error);
+            if (errorMessage.includes('invalid syntax') || errorMessage.includes('syntax error')) {
+                this.filesWithSyntaxErrors.add(filePath);
+                logger.debug('Marked file as having syntax errors', { filePath });
+            }
+
+            // Don't throw - this is best-effort
+        } finally {
+            // Always remove from set, even if indexing failed
+            this.filesBeingIndexed.delete(filePath);
+        }
+    }
+
     private _refreshIndexInBackground(): void {
         // Refresh index in background without blocking
         const config = vscode.workspace.getConfiguration('pythonInheritance');
@@ -459,23 +497,164 @@ export class InheritanceIndexManager {
         methodName: string,
         line: number
     ): MethodRelationship | null {
+        const classNameShort = className.split('.').pop() || className;
+        let fileFoundInIndex = false;
+        
         if (!(filePath in this.index)) {
-            return null;
+            // Try to find the file with different path formats
+            const normalizedPath = filePath.replace(/\\/g, '/');
+            const indexKeys = Object.keys(this.index);
+            const matchingKey = indexKeys.find(key => {
+                const normalizedKey = key.replace(/\\/g, '/');
+                return normalizedKey === normalizedPath || 
+                       normalizedKey.endsWith(normalizedPath) ||
+                       normalizedPath.endsWith(normalizedKey);
+            });
+            
+            if (matchingKey) {
+                logger.debug('getRelationshipsForMethod: found file with different path format', { 
+                    requested: filePath, 
+                    found: matchingKey 
+                });
+                filePath = matchingKey;
+                fileFoundInIndex = true;
+            } else {
+                logger.debug('getRelationshipsForMethod: file not in index, searching by class and method name', { 
+                    filePath, 
+                    className, 
+                    methodName,
+                    indexFileCount: indexKeys.length,
+                    sampleKeys: indexKeys.slice(0, 5)
+                });
+                // Try to index the file on-demand if it exists and is within workspace
+                if (fs.existsSync(filePath) && filePath.startsWith(this.workspaceRoot)) {
+                    logger.debug('getRelationshipsForMethod: attempting on-demand indexing', { filePath });
+                    // Index asynchronously (don't block, but trigger indexing)
+                    this._indexFileOnDemand(filePath).catch(err => {
+                        logger.debug('On-demand indexing failed', { filePath, error: err });
+                    });
+                }
+                // Continue to search by class/method name even if file is not indexed
+                fileFoundInIndex = false;
+            }
+        } else {
+            fileFoundInIndex = true;
         }
 
-        const fileData = this.index[filePath];
-        const relationships = Array.isArray(fileData) ? fileData : (fileData as FileInheritanceData).methods || [];
-        
-        for (const rel of relationships) {
-            if (
-                rel.method.class_name === className &&
-                rel.method.name === methodName &&
-                Math.abs(rel.method.line - line) <= 1
-            ) {
-                return rel;
+        // First, try to find the relationship in the file's data (if file is indexed)
+        if (fileFoundInIndex) {
+            const fileData = this.index[filePath];
+            const relationships = Array.isArray(fileData) ? fileData : (fileData as FileInheritanceData).methods || [];
+            
+            logger.debug('getRelationshipsForMethod searching in file', { 
+                filePath, 
+                className, 
+                classNameShort,
+                methodName, 
+                line,
+                relationshipCount: relationships.length 
+            });
+            
+            for (const rel of relationships) {
+                const relClassName = rel.method.class_name;
+                const relClassNameShort = relClassName.split('.').pop() || relClassName;
+                
+                // Match by both full name and short name
+                const nameMatches = relClassName === className || relClassNameShort === classNameShort;
+                const methodMatches = rel.method.name === methodName;
+                const lineMatches = Math.abs(rel.method.line - line) <= 1;
+                
+                if (nameMatches && methodMatches && lineMatches) {
+                    logger.debug('getRelationshipsForMethod found relationship', { 
+                        className, 
+                        methodName,
+                        baseCount: rel.base_methods?.length || 0,
+                        overrideCount: rel.override_methods?.length || 0
+                    });
+                    return rel;
+                }
             }
         }
 
+        // If not found in the file (or file not indexed), search through all indexed files
+        // Look for relationships where:
+        // 1. Other classes have methods that override this base class's methods (base_methods contains this class)
+        // 2. This class's methods are in other classes' base_methods (to find overrides)
+        logger.debug('getRelationshipsForMethod searching across all files', { 
+            className, 
+            classNameShort,
+            methodName, 
+            line
+        });
+        
+        // First, try to find the method in the base class by searching for it directly
+        for (const [, otherFileData] of Object.entries(this.index)) {
+            const otherRelationships = Array.isArray(otherFileData) ? otherFileData : (otherFileData as FileInheritanceData).methods || [];
+            for (const rel of otherRelationships) {
+                const relClassName = rel.method.class_name;
+                const relClassNameShort = relClassName.split('.').pop() || relClassName;
+                
+                // Match by both full name and short name
+                const nameMatches = relClassName === className || relClassNameShort === classNameShort;
+                const methodMatches = rel.method.name === methodName;
+                // For cross-file search, be more lenient with line matching (within 5 lines)
+                const lineMatches = Math.abs(rel.method.line - line) <= 5;
+                
+                if (nameMatches && methodMatches && lineMatches) {
+                    logger.debug('getRelationshipsForMethod found relationship in other file', { 
+                        className, 
+                        methodName,
+                        foundInFile: rel.method.file_path,
+                        baseCount: rel.base_methods?.length || 0,
+                        overrideCount: rel.override_methods?.length || 0
+                    });
+                    return rel;
+                }
+            }
+        }
+        
+        // Second, look for methods in other classes that have this base class method in their base_methods
+        // This finds subclasses that override the base class method
+        for (const [, otherFileData] of Object.entries(this.index)) {
+            const otherRelationships = Array.isArray(otherFileData) ? otherFileData : (otherFileData as FileInheritanceData).methods || [];
+            for (const rel of otherRelationships) {
+                // Check if any base_methods match the base class we're looking for
+                for (const baseMethod of rel.base_methods) {
+                    const baseClassName = baseMethod.class_name;
+                    const baseClassNameShort = baseClassName.split('.').pop() || baseClassName;
+                    const baseMethodMatches = baseMethod.name === methodName;
+                    const baseNameMatches = baseClassName === className || baseClassNameShort === classNameShort;
+                    
+                    if (baseNameMatches && baseMethodMatches) {
+                        // Found a subclass method that overrides this base class method
+                        // Return a synthetic relationship showing the override
+                        logger.debug('getRelationshipsForMethod found override relationship', { 
+                            baseClassName, 
+                            baseMethodName: methodName,
+                            overrideClassName: rel.method.class_name,
+                            overrideMethodName: rel.method.name,
+                            foundInFile: rel.method.file_path
+                        });
+                        // Return the relationship from the subclass's perspective, but mark it as having an override
+                        return {
+                            method: {
+                                name: methodName,
+                                class_name: className,
+                                file_path: filePath,
+                                line: line,
+                                column: 0,
+                                end_line: line,
+                                end_column: 0
+                            },
+                            base_methods: [],
+                            override_methods: [rel.method]
+                        };
+                    }
+                }
+            }
+        }
+        
+        logger.debug('getRelationshipsForMethod not found', { filePath, className, methodName, line });
         return null;
     }
 
@@ -484,60 +663,178 @@ export class InheritanceIndexManager {
         className: string,
         _line?: number
     ): { baseClasses: string[]; subClasses: string[]; classLine?: number } | null {
+        const classNameShort = className.split('.').pop() || className;
+        let fileFoundInIndex = false;
+        
         if (!(filePath in this.index)) {
-            return null;
+            // Try to find the file with different path formats
+            const normalizedPath = filePath.replace(/\\/g, '/');
+            const indexKeys = Object.keys(this.index);
+            const matchingKey = indexKeys.find(key => {
+                const normalizedKey = key.replace(/\\/g, '/');
+                return normalizedKey === normalizedPath || 
+                       normalizedKey.endsWith(normalizedPath) ||
+                       normalizedPath.endsWith(normalizedKey);
+            });
+            
+            if (matchingKey) {
+                logger.debug('getClassInheritance: found file with different path format', { 
+                    requested: filePath, 
+                    found: matchingKey 
+                });
+                filePath = matchingKey;
+                fileFoundInIndex = true;
+            } else {
+                logger.debug('getClassInheritance: file not in index, searching by class name', { 
+                    filePath, 
+                    className,
+                    indexFileCount: indexKeys.length,
+                    sampleKeys: indexKeys.slice(0, 5)
+                });
+                // Try to index the file on-demand if it exists and is within workspace
+                if (fs.existsSync(filePath) && filePath.startsWith(this.workspaceRoot)) {
+                    logger.debug('getClassInheritance: attempting on-demand indexing', { filePath });
+                    // Index asynchronously (don't block, but trigger indexing)
+                    this._indexFileOnDemand(filePath).catch(err => {
+                        logger.debug('On-demand indexing failed', { filePath, error: err });
+                    });
+                }
+                // Continue to search by class name even if file is not indexed
+                fileFoundInIndex = false;
+            }
+        } else {
+            fileFoundInIndex = true;
         }
 
-        const fileData = this.index[filePath];
+        // First, try to find class-level inheritance data in the file (if file is indexed)
+        let classInfo: ClassInheritance | null = null;
+        let classLine: number | undefined = undefined;
         
-        // Check if we have class-level inheritance data
-        if (fileData && typeof fileData === 'object' && 'classes' in fileData) {
-            const fileInheritance = fileData as FileInheritanceData;
-            if (fileInheritance.classes && fileInheritance.classes[className]) {
-                const classInfo = fileInheritance.classes[className];
-                // Extract short names from full names for display
-                const baseClasses = classInfo.base_classes.map((fullName: string) => {
-                    const parts = fullName.split('.');
-                    return parts[parts.length - 1];
-                });
-                const subClasses = classInfo.sub_classes.map((fullName: string) => {
-                    const parts = fullName.split('.');
-                    return parts[parts.length - 1];
-                });
-                return { 
-                    baseClasses, 
-                    subClasses,
-                    classLine: classInfo.line  // Include class definition line
-                };
+        if (fileFoundInIndex) {
+            const fileData = this.index[filePath];
+            
+            // Check if we have class-level inheritance data
+            if (fileData && typeof fileData === 'object' && 'classes' in fileData) {
+                const fileInheritance = fileData as FileInheritanceData;
+                if (fileInheritance.classes) {
+                    // Try exact match first
+                    classInfo = fileInheritance.classes[className] || null;
+                    
+                    // If not found, try short name match
+                    if (!classInfo) {
+                        for (const [key, value] of Object.entries(fileInheritance.classes)) {
+                            const keyShort = key.split('.').pop() || key;
+                            if (keyShort === classNameShort || key === className) {
+                                classInfo = value;
+                                break;
+                            }
+                        }
+                    }
+                    
+                    if (classInfo) {
+                        classLine = classInfo.line;
+                    }
+                }
             }
+        }
+        
+        // If file is not indexed or class info not found in indexed file, search all files by class name
+        if (!classInfo) {
+            for (const [, otherFileData] of Object.entries(this.index)) {
+                if (otherFileData && typeof otherFileData === 'object' && 'classes' in otherFileData) {
+                    const fileInheritance = otherFileData as FileInheritanceData;
+                    if (fileInheritance.classes) {
+                        // Try exact match first
+                        let foundClassInfo = fileInheritance.classes[className];
+                        
+                        // If not found, try short name match
+                        if (!foundClassInfo) {
+                            for (const [key, value] of Object.entries(fileInheritance.classes)) {
+                                const keyShort = key.split('.').pop() || key;
+                                if (keyShort === classNameShort || key === className) {
+                                    foundClassInfo = value;
+                                    break;
+                                }
+                            }
+                        }
+                        
+                        if (foundClassInfo) {
+                            classInfo = foundClassInfo;
+                            classLine = foundClassInfo.line;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        // If we found class-level inheritance data, use it
+        if (classInfo) {
+            // Extract short names from full names for display
+            const baseClasses = classInfo.base_classes.map((fullName: string) => {
+                const parts = fullName.split('.');
+                return parts[parts.length - 1];
+            });
+            const subClasses = classInfo.sub_classes.map((fullName: string) => {
+                const parts = fullName.split('.');
+                return parts[parts.length - 1];
+            });
+            return { 
+                baseClasses, 
+                subClasses,
+                classLine: classLine
+            };
         }
 
         // Fallback: Find all relationships for this class (method-based inference)
         const baseClasses = new Set<string>();
         const subClasses = new Set<string>();
 
-        const relationships = Array.isArray(fileData) ? fileData : (fileData as FileInheritanceData).methods || [];
-        for (const rel of relationships) {
-            if (rel.method.class_name === className) {
-                // Check if this method has base methods (class inherits from another)
-                for (const baseMethod of rel.base_methods) {
-                    baseClasses.add(baseMethod.class_name);
-                }
-                // Check if this method has overrides (other classes inherit from this)
-                for (const overrideMethod of rel.override_methods) {
-                    subClasses.add(overrideMethod.class_name);
+        // If file is indexed, check its relationships first
+        if (fileFoundInIndex) {
+            const fileData = this.index[filePath];
+            const relationships = Array.isArray(fileData) ? fileData : (fileData as FileInheritanceData).methods || [];
+            for (const rel of relationships) {
+                const relClassName = rel.method.class_name;
+                const relClassNameShort = relClassName.split('.').pop() || relClassName;
+                
+                // Match by both full name and short name
+                if (relClassName === className || relClassNameShort === classNameShort) {
+                    // Check if this method has base methods (class inherits from another)
+                    for (const baseMethod of rel.base_methods) {
+                        baseClasses.add(baseMethod.class_name);
+                    }
+                    // Check if this method has overrides (other classes inherit from this)
+                    for (const overrideMethod of rel.override_methods) {
+                        subClasses.add(overrideMethod.class_name);
+                    }
                 }
             }
         }
 
-        // Also check reverse - if other classes have methods that override this class's methods
+        // Search through all indexed files to find relationships
         for (const [, otherFileData] of Object.entries(this.index)) {
             const otherRelationships = Array.isArray(otherFileData) ? otherFileData : (otherFileData as FileInheritanceData).methods || [];
             for (const rel of otherRelationships) {
+                const relClassName = rel.method.class_name;
+                const relClassNameShort = relClassName.split('.').pop() || relClassName;
+                
                 // If this class's methods are base methods for other classes
                 for (const baseMethod of rel.base_methods) {
-                    if (baseMethod.class_name === className) {
-                        subClasses.add(rel.method.class_name);
+                    const baseClassName = baseMethod.class_name;
+                    const baseClassNameShort = baseClassName.split('.').pop() || baseClassName;
+                    if (baseClassName === className || baseClassNameShort === classNameShort) {
+                        subClasses.add(relClassName);
+                    }
+                }
+                
+                // If this class has methods that override base class methods
+                if (relClassName === className || relClassNameShort === classNameShort) {
+                    for (const baseMethod of rel.base_methods) {
+                        baseClasses.add(baseMethod.class_name);
+                    }
+                    for (const overrideMethod of rel.override_methods) {
+                        subClasses.add(overrideMethod.class_name);
                     }
                 }
             }
@@ -546,7 +843,8 @@ export class InheritanceIndexManager {
         if (baseClasses.size > 0 || subClasses.size > 0) {
             return {
                 baseClasses: Array.from(baseClasses),
-                subClasses: Array.from(subClasses)
+                subClasses: Array.from(subClasses),
+                classLine: classLine
             };
         }
 
@@ -555,46 +853,71 @@ export class InheritanceIndexManager {
 
     findClassDefinitionSync(className: string): { filePath: string; line: number; column: number } | null {
         // Search through the index to find class definitions (synchronous version)
+        // className might be a short name (e.g., "BaseChannel") or full name
+        const classNameShort = className.split('.').pop() || className;
+        
+        logger.debug('findClassDefinitionSync searching', { className, classNameShort, indexFileCount: Object.keys(this.index).length });
+        
         for (const [filePath, fileData] of Object.entries(this.index)) {
             // Check class inheritance data - this has the class definition line
             if (fileData && typeof fileData === 'object' && 'classes' in fileData) {
                 const fileInheritance = fileData as FileInheritanceData;
-                if (fileInheritance.classes && fileInheritance.classes[className]) {
-                    const classInfo = fileInheritance.classes[className];
-                    // Use the stored class definition line if available
-                    if (classInfo.line && classInfo.line > 0) {
-                        return {
-                            filePath: filePath,
-                            line: classInfo.line,
-                            column: 0  // Column will be found in async version if needed
-                        };
-                    }
-                    // Fallback: Try to find the class definition line from method relationships
-                    const relationships = fileInheritance.methods || [];
-                    for (const rel of relationships) {
-                        if (rel.method.class_name === className) {
-                            // Use the first method's location as a starting point
-                            // The class definition should be before the first method
-                            return {
-                                filePath: filePath,
-                                line: Math.max(1, rel.method.line - 10), // Start searching a few lines before first method
-                                column: 0
-                            };
+                if (fileInheritance.classes) {
+                    // Try exact match first
+                    let classInfo = fileInheritance.classes[className];
+                    
+                    // If not found, try short name match
+                    if (!classInfo) {
+                        for (const [key, value] of Object.entries(fileInheritance.classes)) {
+                            const keyShort = key.split('.').pop() || key;
+                            if (keyShort === classNameShort || key === className) {
+                                classInfo = value;
+                                break;
+                            }
                         }
                     }
-                    // If no methods found, return file path - will search in async version
-                    return {
-                        filePath: filePath,
-                        line: 0,
-                        column: 0
-                    };
+                    
+                    if (classInfo) {
+                        logger.debug('findClassDefinitionSync found class info', { className, filePath, line: classInfo.line });
+                        // Use the stored class definition line if available
+                        if (classInfo.line && classInfo.line > 0) {
+                            return {
+                                filePath: filePath,
+                                line: classInfo.line,
+                                column: 0  // Column will be found in async version if needed
+                            };
+                        }
+                        // Fallback: Try to find the class definition line from method relationships
+                        const relationships = fileInheritance.methods || [];
+                        for (const rel of relationships) {
+                            const relClassName = rel.method.class_name;
+                            const relClassNameShort = relClassName.split('.').pop() || relClassName;
+                            if (relClassName === className || relClassNameShort === classNameShort) {
+                                // Use the first method's location as a starting point
+                                // The class definition should be before the first method
+                                return {
+                                    filePath: filePath,
+                                    line: Math.max(1, rel.method.line - 10), // Start searching a few lines before first method
+                                    column: 0
+                                };
+                            }
+                        }
+                        // If no methods found, return file path - will search in async version
+                        return {
+                            filePath: filePath,
+                            line: 0,
+                            column: 0
+                        };
+                    }
                 }
             }
             
             // Also check method relationships for the class (fallback)
             const relationships = Array.isArray(fileData) ? fileData : (fileData as FileInheritanceData).methods || [];
             for (const rel of relationships) {
-                if (rel.method.class_name === className) {
+                const relClassName = rel.method.class_name;
+                const relClassNameShort = relClassName.split('.').pop() || relClassName;
+                if (relClassName === className || relClassNameShort === classNameShort) {
                     // This gives us a method line, not the class line, but it's better than nothing
                     return {
                         filePath: filePath,
@@ -605,6 +928,7 @@ export class InheritanceIndexManager {
             }
         }
         
+        logger.debug('findClassDefinitionSync not found', { className, classNameShort, searchedFiles: Object.keys(this.index).length });
         return null;
     }
 
@@ -612,6 +936,37 @@ export class InheritanceIndexManager {
         // Search through the index to find class definitions
         const syncResult = this.findClassDefinitionSync(className);
         if (!syncResult) {
+            logger.debug('findClassDefinition: sync search failed, trying file search', { className });
+            // If sync search failed, try searching all Python files in workspace
+            const classNameShort = className.split('.').pop() || className;
+            const pattern = new vscode.RelativePattern(
+                vscode.workspace.workspaceFolders?.[0] || vscode.Uri.file(''),
+                '**/*.py'
+            );
+            const files = await vscode.workspace.findFiles(pattern, '**/node_modules/**', 100);
+            
+            for (const file of files) {
+                try {
+                    const document = await vscode.workspace.openTextDocument(file);
+                    for (let i = 0; i < document.lineCount; i++) {
+                        const line = document.lineAt(i);
+                        const trimmed = line.text.trim();
+                        // Match class definition: "class ClassName" or "class ClassName("
+                        const match = trimmed.match(new RegExp(`^class\\s+${classNameShort.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*[:(]`));
+                        if (match) {
+                            logger.debug('findClassDefinition: found via file search', { className, filePath: file.fsPath, line: i + 1 });
+                            return {
+                                filePath: file.fsPath,
+                                line: i + 1,
+                                column: line.firstNonWhitespaceCharacterIndex
+                            };
+                        }
+                    }
+                } catch (error) {
+                    // Continue searching other files
+                    continue;
+                }
+            }
             return null;
         }
         
@@ -620,14 +975,16 @@ export class InheritanceIndexManager {
             try {
                 const uri = vscode.Uri.file(syncResult.filePath);
                 const document = await vscode.workspace.openTextDocument(uri);
+                const classNameShort = className.split('.').pop() || className;
                 // Search from the beginning or from the estimated location
                 const startLine = syncResult.line > 0 ? Math.max(0, syncResult.line - 10) : 0;
                 for (let i = startLine; i < document.lineCount; i++) {
                     const line = document.lineAt(i);
                     const trimmed = line.text.trim();
-                    // Match class definition: "class ClassName" or "class ClassName("
-                    const match = trimmed.match(new RegExp(`^class\\s+${className.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*[:(]`));
-                    if (match) {
+                    // Match class definition: "class ClassName" or "class ClassName(" - try both full and short name
+                    const fullNameMatch = trimmed.match(new RegExp(`^class\\s+${className.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*[:(]`));
+                    const shortNameMatch = trimmed.match(new RegExp(`^class\\s+${classNameShort.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*[:(]`));
+                    if (fullNameMatch || shortNameMatch) {
                         return {
                             filePath: syncResult.filePath,
                             line: i + 1,
@@ -659,35 +1016,36 @@ export class InheritanceIndexManager {
 
         this._isIndexing = true;
 
-        await vscode.window.withProgress({
-            location: vscode.ProgressLocation.Notification,
-            title: 'Python Inheritance Navigator',
-            cancellable: false
-        }, async (progress) => {
-            progress.report({ increment: 0, message: 'Refreshing index...' });
-
-            try {
-                await this._performIndexing(indexingScope, progress);
-
-                // Get file count for notification
-                const fileCount = Object.keys(this.index).length;
-
-                // Show success notification
-                vscode.window.showInformationMessage(
-                    `Python Inheritance Navigator: Index refreshed - found inheritance in ${fileCount} files`,
-                    'View Log'
-                ).then(selection => {
-                    if (selection === 'View Log') {
-                        logger.showOutputChannel();
-                    }
-                });
-
-                // Save index to file
-                this._saveIndexToFile();
-            } finally {
-                this._isIndexing = false;
+        vscode.window.showInformationMessage(
+            'Python Inheritance Navigator: Refreshing index in the background. A notification will appear when indexing is complete.',
+            'View Log'
+        ).then(selection => {
+            if (selection === 'View Log') {
+                logger.showOutputChannel();
             }
         });
+
+        try {
+            await this._performIndexing(indexingScope);
+
+            // Get file count for notification
+            const fileCount = Object.keys(this.index).length;
+
+            // Show success notification
+            vscode.window.showInformationMessage(
+                `Python Inheritance Navigator: Index refreshed - found inheritance in ${fileCount} files`,
+                'View Log'
+            ).then(selection => {
+                if (selection === 'View Log') {
+                    logger.showOutputChannel();
+                }
+            });
+
+            // Save index to file
+            this._saveIndexToFile();
+        } finally {
+            this._isIndexing = false;
+        }
     }
 
     async cleanAndReindex(): Promise<void> {
@@ -714,35 +1072,36 @@ export class InheritanceIndexManager {
 
         this._isIndexing = true;
 
-        await vscode.window.withProgress({
-            location: vscode.ProgressLocation.Notification,
-            title: 'Python Inheritance Navigator',
-            cancellable: false
-        }, async (progress) => {
-            progress.report({ increment: 0, message: 'Cleaning and rebuilding index...' });
-
-            try {
-                await this._performIndexing(indexingScope, progress);
-
-                // Get file count for notification
-                const fileCount = Object.keys(this.index).length;
-
-                // Show success notification
-                vscode.window.showInformationMessage(
-                    `Python Inheritance Navigator: Index cleaned and rebuilt - found inheritance in ${fileCount} files`,
-                    'View Log'
-                ).then(selection => {
-                    if (selection === 'View Log') {
-                        logger.showOutputChannel();
-                    }
-                });
-
-                // Save new index to file
-                this._saveIndexToFile();
-            } finally {
-                this._isIndexing = false;
+        vscode.window.showInformationMessage(
+            'Python Inheritance Navigator: Cleaning and rebuilding index in the background. A notification will appear when indexing is complete.',
+            'View Log'
+        ).then(selection => {
+            if (selection === 'View Log') {
+                logger.showOutputChannel();
             }
         });
+
+        try {
+            await this._performIndexing(indexingScope);
+
+            // Get file count for notification
+            const fileCount = Object.keys(this.index).length;
+
+            // Show success notification
+            vscode.window.showInformationMessage(
+                `Python Inheritance Navigator: Index cleaned and rebuilt - found inheritance in ${fileCount} files`,
+                'View Log'
+            ).then(selection => {
+                if (selection === 'View Log') {
+                    logger.showOutputChannel();
+                }
+            });
+
+            // Save new index to file
+            this._saveIndexToFile();
+        } finally {
+            this._isIndexing = false;
+        }
     }
 
     async clearAllIndexes(): Promise<void> {

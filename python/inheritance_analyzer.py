@@ -24,16 +24,33 @@ class InheritanceAnalyzer:
         self.calculator = MROCalculator(root_dir)
         self.method_extractor = MethodExtractor()
         self.inheritance_analyzer = MethodInheritanceAnalyzer()
+        self.processed_count = 0
     
     def analyze_file(self, file_path: str) -> Dict:
+        """Analyze a single file and register its classes.
+
+        Note: This does NOT call to_json() to avoid expensive recomputation.
+        Call to_json() once after analyzing all files.
+        """
         if not os.path.exists(file_path):
             return {}
-        
+
         with open(file_path, 'r', encoding='utf-8') as f:
             content = f.read()
-        
-        self.calculator.replace_content_in_cache(file_path, content)
-        self.calculator.update_one(file_path)
+
+        # Check if file has valid Python syntax before proceeding
+        try:
+            ast.parse(content)
+        except SyntaxError as e:
+            print(f'Error analyzing {file_path}: invalid syntax ({e.msg}, line {e.lineno})', file=sys.stderr)
+            return {}
+
+        try:
+            self.calculator.replace_content_in_cache(file_path, content)
+            self.calculator.update_one(file_path)
+        except Exception as e:
+            print(f'Error analyzing {file_path}: {e}', file=sys.stderr)
+            return {}
         
         if file_path not in self.calculator.parsed_names_by_path:
             return {}
@@ -44,7 +61,9 @@ class InheritanceAnalyzer:
             if isinstance(parsed_class, ParsedCustomClass):
                 self._analyze_class(parsed_class, file_path)
         
-        return self.inheritance_analyzer.to_json()
+        # Return empty dict - relationships will be computed once at the end via to_json()
+        # This avoids expensive recomputation after every file
+        return {}
     
     def _analyze_class(self, parsed_class: ParsedCustomClass, file_path: str):
         class_full_name = parsed_class.full_name
@@ -74,10 +93,24 @@ class InheritanceAnalyzer:
 
         try:
             # Try to get MRO, but fall back to just the direct base classes if it fails
+            mro = None
             try:
-                mro = [cls.full_name for cls in parsed_class.mro_parsed_list]
+                if hasattr(parsed_class, 'mro_parsed_list') and parsed_class.mro_parsed_list is not None:
+                    mro = [cls.full_name for cls in parsed_class.mro_parsed_list]
+                else:
+                    raise ValueError('mro_parsed_list is None or not available')
+            except (AttributeError, TypeError, ValueError, IndexError) as e:
+                # These are expected errors for test classes and edge cases - handle silently
+                # Only log at debug level if needed (commented out to reduce noise)
+                # print(f'Debug: Could not get MRO for {class_full_name}: {e}', file=sys.stderr)
+                mro = [class_full_name] + direct_base_classes + ['builtins.object']
             except Exception as e:
-                print(f'Warning: Could not get MRO for {class_full_name}: {e}', file=sys.stderr)
+                # Unexpected errors - log but don't print full traceback to reduce noise
+                # Only log the error message, not the full traceback
+                print(f'Warning: Unexpected error getting MRO for {class_full_name}: {type(e).__name__}: {e}', file=sys.stderr)
+                mro = [class_full_name] + direct_base_classes + ['builtins.object']
+
+            if mro is None:
                 mro = [class_full_name] + direct_base_classes + ['builtins.object']
 
             class_def_ast = parsed_class._get_class_def_ast_from_lines()
@@ -90,6 +123,8 @@ class InheritanceAnalyzer:
             self.inheritance_analyzer.register_class(class_full_name, methods, mro, file_path, direct_base_classes, class_line)
         except Exception as e:
             print(f'Error analyzing class {class_full_name}: {e}', file=sys.stderr)
+            import traceback
+            traceback.print_exc(file=sys.stderr)
 
     def _extract_base_classes_from_ast(self, file_path: str, parsed_class: ParsedCustomClass) -> List[str]:
         """Extract base class names directly from AST when mrols fails"""
@@ -149,18 +184,52 @@ class InheritanceAnalyzer:
                     python_files.append(file_path)
         
         total_files = len(python_files)
+        self.processed_count = 0
+        
+        # Process files sequentially (MROCalculator and MethodInheritanceAnalyzer are not thread-safe)
+        # But we'll make progress updates more frequent
         files_with_inheritance = 0
         
-        for file_path in python_files:
+        for idx, file_path in enumerate(python_files):
             try:
-                result = self.analyze_file(file_path)
-                if result and len(result) > 0:
-                    files_with_inheritance += 1
+                # analyze_file() now just registers classes, doesn't return results
+                # This avoids expensive to_json() computation after every file
+                self.analyze_file(file_path)
+                
+                # Update progress counter
+                self.processed_count = idx + 1
+                
+                # Log progress every 5 files, or at milestones, or every file if < 50 files total
+                progress_interval = 5 if total_files > 50 else 1
+                should_log = (
+                    (idx + 1) % progress_interval == 0 or
+                    (idx + 1) == total_files or
+                    (total_files > 10 and (
+                        (idx + 1) == int(total_files * 0.1) or
+                        (idx + 1) == int(total_files * 0.25) or
+                        (idx + 1) == int(total_files * 0.5) or
+                        (idx + 1) == int(total_files * 0.75)
+                    ))
+                )
+                if should_log:
+                    percent = int((idx + 1) / total_files * 100) if total_files > 0 else 0
+                    print(f'[PROGRESS] {idx + 1}/{total_files} files ({percent}%)', file=sys.stderr)
             except Exception as e:
                 print(f'Error analyzing {file_path}: {e}', file=sys.stderr)
+                self.processed_count = idx + 1
+        
+        # Now compute all relationships once at the end (much faster than doing it per-file)
+        total_classes = len(self.inheritance_analyzer.class_methods)
+        if total_classes > 0:
+            print(f'[PROGRESS] All files analyzed. Computing relationships for {total_classes} classes...', file=sys.stderr)
         
         final_result = self.inheritance_analyzer.to_json()
         files_indexed = len(final_result)
+        
+        # Count files that actually have inheritance relationships
+        files_with_inheritance = sum(1 for file_data in final_result.values() 
+                                     if file_data and (isinstance(file_data, dict) and 
+                                                      (file_data.get('methods') or file_data.get('classes'))))
         
         # Log statistics to stderr (won't break JSON output)
         print(f'[STATS] Scanned {total_files} Python files, found inheritance in {files_indexed} files', file=sys.stderr)
@@ -184,16 +253,20 @@ def main():
         
         for file_path in file_paths:
             try:
-                file_result = analyzer.analyze_file(file_path)
-                if file_result and len(file_result) > 0:
-                    files_with_inheritance += 1
+                # analyze_file() now just registers classes, doesn't return results
+                analyzer.analyze_file(file_path)
             except Exception as e:
                 print(f'Error analyzing {file_path}: {e}', file=sys.stderr)
                 # Continue processing other files even if one fails
         
-        # Get combined results from all files
+        # Get combined results from all files (compute relationships once at the end)
         result = analyzer.inheritance_analyzer.to_json()
         files_indexed = len(result)
+        
+        # Count files that actually have inheritance relationships
+        files_with_inheritance = sum(1 for file_data in result.values() 
+                                     if file_data and (isinstance(file_data, dict) and 
+                                                      (file_data.get('methods') or file_data.get('classes'))))
         
         # Log statistics to stderr (won't break JSON output)
         print(f'[STATS] Scanned {total_files} Python files, found inheritance in {files_indexed} files', file=sys.stderr)

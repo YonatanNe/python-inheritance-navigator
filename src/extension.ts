@@ -13,6 +13,7 @@ let indexManager: InheritanceIndexManager | null = null;
 let codeLensProvider: InheritanceCodeLensProvider | null = null;
 let hoverProvider: InheritanceHoverProvider | null = null;
 let commandHandlers: CommandHandlers | null = null;
+let venvManager: VenvManager | null = null;
 
 export function activate(context: vscode.ExtensionContext) {
     // Read configuration
@@ -73,27 +74,27 @@ export function activate(context: vscode.ExtensionContext) {
         return;
     }
 
-    // Initialize venv manager and ensure venv is set up (async initialization)
-    (async () => {
-        const venvManager = new VenvManager(storagePath, extensionPath);
-        let pythonPath: string;
-        
-        try {
-            pythonPath = await venvManager.ensureVenv();
-            logger.info('Using extension-managed venv', { pythonPath });
-        } catch (error) {
-            logger.error('Failed to setup extension venv', error);
-            const errorMessage = error instanceof Error ? error.message : String(error);
-            vscode.window.showErrorMessage(`Failed to initialize Python Inheritance Navigator: ${errorMessage}`);
-            return;
-        }
+        // Initialize venv manager and ensure venv is set up (async initialization)
+        (async () => {
+            venvManager = new VenvManager(storagePath, extensionPath);
+            let pythonPath: string;
 
-        logger.info('Initializing components', { workspaceRoot, pythonPath, extensionPath, storagePath });
+            try {
+                pythonPath = await venvManager.ensureVenv();
+                logger.info('Using extension-managed venv', { pythonPath });
+            } catch (error) {
+                logger.error('Failed to setup extension venv', error);
+                const errorMessage = error instanceof Error ? error.message : String(error);
+                vscode.window.showErrorMessage(`Failed to initialize Python Inheritance Navigator: ${errorMessage}`);
+                return;
+            }
 
-        indexManager = new InheritanceIndexManager(workspaceRoot, pythonPath, extensionPath, storagePath);
-        codeLensProvider = new InheritanceCodeLensProvider(indexManager);
-        hoverProvider = new InheritanceHoverProvider(indexManager);
-        commandHandlers = new CommandHandlers(indexManager);
+            logger.info('Initializing components', { workspaceRoot, pythonPath, extensionPath, storagePath });
+
+            indexManager = new InheritanceIndexManager(workspaceRoot, pythonPath, extensionPath, storagePath);
+            codeLensProvider = new InheritanceCodeLensProvider(indexManager);
+            hoverProvider = new InheritanceHoverProvider(indexManager);
+            commandHandlers = new CommandHandlers(indexManager, venvManager);
         
         // Refresh CodeLens when index is updated
         indexManager.onIndexUpdated(() => {
@@ -102,10 +103,18 @@ export function activate(context: vscode.ExtensionContext) {
             }
         });
 
-        const codeLensDisposable = vscode.languages.registerCodeLensProvider(
-            { language: 'python' },
-            codeLensProvider
-        );
+        // Register CodeLens provider after a short delay to ensure it appears after git blame CodeLens
+        // This ensures our extension's CodeLens text appears last (after git text)
+        let codeLensDisposable: vscode.Disposable | undefined;
+        setTimeout(() => {
+            if (codeLensProvider) {
+                codeLensDisposable = vscode.languages.registerCodeLensProvider(
+                    { language: 'python' },
+                    codeLensProvider
+                );
+                context.subscriptions.push(codeLensDisposable);
+            }
+        }, 100);
 
         const hoverDisposable = vscode.languages.registerHoverProvider(
             { language: 'python' },
@@ -191,6 +200,15 @@ export function activate(context: vscode.ExtensionContext) {
             }
         );
 
+        const removeExtensionVenvCommand = vscode.commands.registerCommand(
+            'pythonInheritance.removeExtensionVenv',
+            async () => {
+                if (commandHandlers) {
+                    await commandHandlers.removeExtensionVenv();
+                }
+            }
+        );
+
         const navigateToLocationCommand = vscode.commands.registerCommand(
             'pythonInheritance.navigateToLocation',
             async (filePath: string, line: number, column: number) => {
@@ -201,7 +219,7 @@ export function activate(context: vscode.ExtensionContext) {
         );
 
         context.subscriptions.push(
-            codeLensDisposable,
+            // codeLensDisposable is added in setTimeout above to ensure it appears after git blame
             hoverDisposable,
             goToBaseCommand,
             goToOverridesCommand,
@@ -209,6 +227,7 @@ export function activate(context: vscode.ExtensionContext) {
             cleanAndReindexCommand,
             openIndexFileCommand,
             clearAllIndexesCommand,
+            removeExtensionVenvCommand,
             navigateToLocationCommand
         );
 
@@ -264,6 +283,7 @@ export function deactivate() {
     codeLensProvider = null;
     hoverProvider = null;
     commandHandlers = null;
+    venvManager = null;
     logger.dispose();
 }
 
